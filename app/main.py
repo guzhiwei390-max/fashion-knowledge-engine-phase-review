@@ -259,6 +259,46 @@ def resume_batch(batch_id: str) -> dict:
     return {"status": "queued", "batch_id": batch_id}
 
 
+@app.post("/api/batches/{batch_id}/vision-budget")
+async def update_batch_vision_budget(batch_id: str, payload: dict) -> dict:
+    max_calls = int(payload.get("max_vision_calls_per_batch", 100))
+    cost_limit = float(payload.get("cost_limit", 0.30))
+    confirmed = 1 if payload.get("confirmed", False) else 0
+    if max_calls < 0 or cost_limit < 0:
+        return unknown_response("max_vision_calls_per_batch", "cost_limit")
+    with connect() as conn:
+        conn.execute(
+            """
+            UPDATE asset_batches
+            SET max_vision_calls_per_batch = ?,
+                cost_limit = ?,
+                require_manual_confirm_before_large_vision_run = ?,
+                vision_status = 'within_budget',
+                status = CASE WHEN status = 'paused' THEN 'queued' ELSE status END,
+                updated_at = datetime('now')
+            WHERE id = ?
+            """,
+            (max_calls, cost_limit, 0 if confirmed else 1, batch_id),
+        )
+        conn.execute(
+            """
+            UPDATE analysis_jobs
+            SET status = 'queued', error_message = NULL
+            WHERE asset_id IN (SELECT id FROM assets WHERE upload_batch_id = ?)
+              AND status = 'paused'
+              AND error_message LIKE 'Vision budget exhausted%'
+            """,
+            (batch_id,),
+        )
+    return {
+        "status": "updated",
+        "batch_id": batch_id,
+        "max_vision_calls_per_batch": max_calls,
+        "cost_limit": cost_limit,
+        "confirmed": bool(confirmed),
+    }
+
+
 @app.get("/api/observations")
 def observations() -> dict:
     return {"observations": latest_observations()}
@@ -603,7 +643,7 @@ ADMIN_HTML = """
       document.querySelector("#visualReferences").innerHTML = rows.map(r => item(`<strong>${esc(r.brand)} / ${esc(r.product_name)}</strong><div class="meta">${esc(r.asset_type)}<br>signature: ${r.visual_signature && r.visual_signature.result !== "Unknown" ? "ready" : "missing"}<br>structure: ${Object.keys(r.structure_json || {}).length ? "ready" : "pending"}</div>`)).join("") || "<div class='meta'>No visual reference library entries</div>";
     }
     function renderBatches(rows) {
-      document.querySelector("#batches").innerHTML = rows.map(b => item(`<strong>${esc(b.id)}</strong><div class="meta">status ${esc(b.status)}<br>total ${b.total_files || 0} / ingested ${b.ingested || 0} / duplicated ${b.duplicated || 0} / corrupted ${b.corrupted || 0} / low quality ${b.low_quality || 0}<br>coarse ${b.coarse_classified || 0} / matched ${b.matched || 0} / unknown ${b.unknown || 0} / review ${b.review_needed || 0} / failed ${b.failed || 0}<br>vision calls ${b.openai_vision_calls_used || 0} / est. cost ${b.estimated_cost || 0}</div>`)).join("") || "<div class='meta'>No batches</div>";
+      document.querySelector("#batches").innerHTML = rows.map(b => item(`<strong>${esc(b.id)}</strong><div class="meta">status ${esc(b.status)} / vision ${esc(b.vision_status || "within_budget")}<br>total ${b.total_files || 0} / ingested ${b.ingested || 0} / duplicated ${b.duplicated || 0} / corrupted ${b.corrupted || 0} / low quality ${b.low_quality || 0}<br>coarse ${b.coarse_classified || 0} / matched ${b.matched || 0} / unknown ${b.unknown || 0} / review ${b.review_needed || 0} / failed ${b.failed || 0}<br>vision calls ${b.vision_calls_used || b.openai_vision_calls_used || 0} / max ${b.max_vision_calls_per_batch || 0} / est. cost ${b.estimated_cost || 0}</div>`)).join("") || "<div class='meta'>No batches</div>";
     }
     function renderReviewQueue(rows) {
       document.querySelector("#reviewQueue").innerHTML = rows.map(r => item(`<strong>${esc(r.reason)}</strong><div class="meta">${esc(r.item_type)} / ${esc(r.item_id)}<br>confidence: ${esc(r.confidence)}<br>${esc(JSON.stringify(r.review_payload || {}))}</div>`)).join("") || "<div class='meta'>No pending review items</div>";

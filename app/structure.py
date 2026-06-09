@@ -19,6 +19,7 @@ STRUCTURE_EVIDENCE_FIELDS = (
 
 STRUCTURE_SOURCE_PRIORITY = {
     "official_visual_reference": 3,
+    "vision_structure": 2,
     "openai_vision_structure": 2,
     "human_correction": 4,
 }
@@ -59,7 +60,7 @@ def structure_evidence_from_observation(
     structure: dict[str, Any],
     *,
     asset_id: str | None = None,
-    source: str = "openai_vision_structure",
+    source: str = "vision_structure",
     confidence: float = 0.0,
 ) -> dict[str, dict[str, Any]]:
     normalized = normalize_structure_aliases(structure)

@@ -125,8 +125,13 @@ def init_db() -> None:
                 unknown INTEGER NOT NULL DEFAULT 0,
                 review_needed INTEGER NOT NULL DEFAULT 0,
                 failed INTEGER NOT NULL DEFAULT 0,
+                vision_calls_used INTEGER NOT NULL DEFAULT 0,
                 openai_vision_calls_used INTEGER NOT NULL DEFAULT 0,
+                max_vision_calls_per_batch INTEGER NOT NULL DEFAULT 100,
                 estimated_cost REAL NOT NULL DEFAULT 0,
+                cost_limit REAL NOT NULL DEFAULT 0.30,
+                require_manual_confirm_before_large_vision_run INTEGER NOT NULL DEFAULT 1,
+                vision_status TEXT NOT NULL DEFAULT 'within_budget',
                 metadata_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -583,6 +588,11 @@ def init_db() -> None:
         ensure_column(conn, "review_queue", "resolution_json", "TEXT NOT NULL DEFAULT '{}'")
         ensure_column(conn, "review_queue", "resolved_by", "TEXT")
         ensure_column(conn, "review_queue", "resolved_at", "TEXT")
+        ensure_column(conn, "asset_batches", "max_vision_calls_per_batch", "INTEGER NOT NULL DEFAULT 100")
+        ensure_column(conn, "asset_batches", "vision_calls_used", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "asset_batches", "cost_limit", "REAL NOT NULL DEFAULT 0.30")
+        ensure_column(conn, "asset_batches", "require_manual_confirm_before_large_vision_run", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "asset_batches", "vision_status", "TEXT NOT NULL DEFAULT 'within_budget'")
         ensure_reserved_extension_columns(conn)
         seed_source_type_registry(conn)
 

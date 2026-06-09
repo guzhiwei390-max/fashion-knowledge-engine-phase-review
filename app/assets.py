@@ -9,7 +9,7 @@ from fastapi import HTTPException, UploadFile
 from PIL import Image, UnidentifiedImageError
 
 from .classification import coarse_classify_asset
-from .config import ALLOWED_IMAGE_EXTENSIONS, MAX_UPLOAD_BYTES, UPLOAD_DIR
+from .config import ALLOWED_IMAGE_EXTENSIONS, MAX_UPLOAD_BYTES, UPLOAD_DIR, max_vision_calls_per_batch, vision_cost_limit, vision_require_confirm_above
 from .database import connect, decode_json, encode_json, utc_now
 from .pipelines import PIPELINE_INTERNAL_UPLOAD, TRUTH_COMMUNITY, TRUTH_OFFICIAL, TRUTH_REALITY
 from .review import enqueue_review_item
@@ -311,11 +311,21 @@ def ensure_batch_record(conn, batch_id: str) -> None:
     now = utc_now()
     conn.execute(
         """
-        INSERT INTO asset_batches (id, status, created_at, updated_at)
-        VALUES (?, 'queued', ?, ?)
+        INSERT INTO asset_batches (
+            id, status, max_vision_calls_per_batch, cost_limit,
+            require_manual_confirm_before_large_vision_run, created_at, updated_at
+        )
+        VALUES (?, 'queued', ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at
         """,
-        (batch_id, now, now),
+        (
+            batch_id,
+            max_vision_calls_per_batch(),
+            vision_cost_limit(),
+            1 if max_vision_calls_per_batch() >= vision_require_confirm_above() else 0,
+            now,
+            now,
+        ),
     )
 
 
@@ -384,13 +394,16 @@ def refresh_batch_progress(conn, batch_id: str) -> None:
         """,
         (batch_id, batch_id),
     ).fetchone()
-    openai_row = conn.execute(
+    vision_row = conn.execute(
         """
         SELECT COUNT(*) AS count
         FROM vision_observations
         JOIN assets ON assets.id = vision_observations.asset_id
         WHERE assets.upload_batch_id = ?
-          AND vision_observations.structured_output LIKE '%"openai_vision_called": true%'
+          AND (
+            vision_observations.structured_output LIKE '%"vision_called": true%'
+            OR vision_observations.structured_output LIKE '%"openai_vision_called": true%'
+          )
         """,
         (batch_id,),
     ).fetchone()
@@ -400,8 +413,13 @@ def refresh_batch_progress(conn, batch_id: str) -> None:
         UPDATE asset_batches
         SET status = ?, total_files = ?, ingested = ?, duplicated = ?, corrupted = ?,
             low_quality = ?, coarse_classified = ?, matched = ?, unknown = ?,
-            review_needed = ?, failed = ?, openai_vision_calls_used = ?,
-            estimated_cost = ?, updated_at = ?
+            review_needed = ?, failed = ?, vision_calls_used = ?, openai_vision_calls_used = ?,
+            estimated_cost = ?,
+            vision_status = CASE
+                WHEN ? >= max_vision_calls_per_batch OR ? >= cost_limit THEN 'paused_budget'
+                ELSE 'within_budget'
+            END,
+            updated_at = ?
         WHERE id = ?
         """,
         (
@@ -416,8 +434,11 @@ def refresh_batch_progress(conn, batch_id: str) -> None:
             int(unknown_row["count"]) + corrupted,
             int(review_row["count"]),
             int(failed_row["count"]),
-            int(openai_row["count"]),
-            round(int(openai_row["count"]) * 0.002, 6),
+            int(vision_row["count"]),
+            int(vision_row["count"]),
+            round(int(vision_row["count"]) * 0.002, 6),
+            int(vision_row["count"]),
+            round(int(vision_row["count"]) * 0.002, 6),
             utc_now(),
             batch_id,
         ),

@@ -10,11 +10,16 @@ from .confidence import evaluate_match_confidence
 from .assets import refresh_batch_progress
 from .database import connect, decode_json, encode_json, utc_now
 from .evidence import build_match_evidence
-from .openai_vision import analyze_image_with_openai, empty_product_structure
+from .openai_vision import empty_product_structure
 from .review import enqueue_review_item
 from .structure import structure_evidence_from_observation
 from .unknown import UNKNOWN
 from .visual import image_signature
+from .vision_provider import analyze_image_with_provider
+from .vision_router import vision_route_decision
+
+
+analyze_image_with_openai = analyze_image_with_provider
 
 
 ASSET_TYPE_MARKERS = {
@@ -52,6 +57,10 @@ def classify_from_evidence(
     file_uri: str,
     source_type: str,
     asset_id: str | None = None,
+    asset_type: str = UNKNOWN,
+    quality_status: str = UNKNOWN,
+    duplicate_status: str = "unique",
+    vision_budget_allowed: bool = True,
 ) -> dict[str, Any]:
     evidence_text = normalize_tokens(f"{original_name} {file_uri}")
     unknown_fields: list[str] = []
@@ -78,11 +87,20 @@ def classify_from_evidence(
             candidate_product = official_product
 
     needs_structure_detail = needs_structure_analysis_from_signature(official_product, signature)
-    should_call_openai = should_call_openai_vision(official_product, match_confidence, needs_structure_detail)
-    if should_call_openai:
-        openai_analysis = analyze_image_with_openai(file_uri, list_catalog())
+    vision_route = should_call_openai_vision(
+        official_product,
+        match_confidence,
+        needs_structure_detail,
+        asset_type=asset_type,
+        quality_status=quality_status,
+        duplicate_status=duplicate_status,
+        vision_budget_allowed=vision_budget_allowed,
+    )
+    should_call_vision = vision_route["allowed"]
+    if should_call_vision:
+        openai_analysis = analyze_image_with_openai(file_uri, narrowed_candidates(official_product))
         product_structure = openai_analysis.get("product_structure", empty_product_structure())
-        structure_source = "openai_vision_structure"
+        structure_source = "vision_structure"
 
     openai_match = openai_analysis.get("product_match", {})
     if openai_match.get("result") == "Known":
@@ -97,7 +115,7 @@ def classify_from_evidence(
                 match_confidence = min(match_confidence, openai_confidence)
             elif not official_product:
                 official_product = openai_product
-                match_method = "openai_vision_structure"
+                match_method = "vision_structure"
                 match_confidence = openai_confidence
 
     if not official_product and not candidate_product:
@@ -143,12 +161,12 @@ def classify_from_evidence(
         vision_reasons=openai_match.get("why", []),
     )
 
-    asset_type = UNKNOWN
+    resolved_asset_type = asset_type
     for marker, value in ASSET_TYPE_MARKERS.items():
-        if marker in evidence_text:
-            asset_type = value
+        if resolved_asset_type == UNKNOWN and marker in evidence_text:
+            resolved_asset_type = value
             break
-    if asset_type == UNKNOWN:
+    if resolved_asset_type == UNKNOWN:
         unknown_fields.append("asset_type")
 
     scene = UNKNOWN
@@ -163,10 +181,10 @@ def classify_from_evidence(
         "product_alias": aliases,
         "category": category,
         "material": material,
-        "asset_type": asset_type,
+        "asset_type": resolved_asset_type,
         "scene": scene,
         "color": UNKNOWN,
-        "view_angle": view_angle_from_asset_type(asset_type),
+        "view_angle": view_angle_from_asset_type(resolved_asset_type),
         "source_type": source_type,
         "visual_signature": signature,
         "product_structure": product_structure,
@@ -176,7 +194,10 @@ def classify_from_evidence(
             "review_reason": decision.reason if decision.requires_review else UNKNOWN,
             "method": match_method,
             "confidence": match_confidence,
-            "openai_vision_called": should_call_openai,
+            "vision_called": should_call_vision,
+            "vision_provider": openai_analysis.get("provider", UNKNOWN),
+            "openai_vision_called": should_call_vision,
+            "vision_route": vision_route,
             "why": openai_analysis.get("product_match", {}).get("why", []),
             "evidence": match_evidence,
         },
@@ -191,12 +212,27 @@ def should_call_openai_vision(
     official_product: dict[str, Any] | None,
     match_confidence: float,
     needs_structure_detail: bool,
-) -> bool:
-    if official_product is None:
-        return True
-    if match_confidence < 0.92:
-        return True
-    return needs_structure_detail
+    *,
+    asset_type: str = UNKNOWN,
+    quality_status: str = UNKNOWN,
+    duplicate_status: str = "unique",
+    vision_budget_allowed: bool = True,
+) -> dict[str, Any]:
+    return vision_route_decision(
+        asset_type=asset_type,
+        quality_status=quality_status,
+        duplicate_status=duplicate_status,
+        has_official_candidate=official_product is not None,
+        match_confidence=match_confidence,
+        needs_structure_detail=needs_structure_detail,
+        budget_allowed=vision_budget_allowed,
+    )
+
+
+def narrowed_candidates(official_product: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if official_product:
+        return [official_product]
+    return list_catalog()[:10]
 
 
 def needs_structure_analysis_from_signature(
@@ -244,6 +280,10 @@ def analyze_asset(asset: dict[str, Any]) -> dict[str, Any]:
         asset["file_uri"],
         asset["source_type"],
         asset_id=asset.get("asset_id") or asset.get("id"),
+        asset_type=asset.get("asset_type", UNKNOWN),
+        quality_status=asset.get("quality_status", UNKNOWN),
+        duplicate_status=asset.get("duplicate_status", "unique"),
+        vision_budget_allowed=bool(asset.get("vision_budget_allowed", True)),
     )
     image_info = inspect_image(asset["file_uri"])
     structured["quality_score"] = image_info["quality_score"]
@@ -276,10 +316,13 @@ def build_confidence_map(structured: dict[str, Any]) -> dict[str, float]:
 def process_pending_jobs(limit: int = 5000) -> dict[str, Any]:
     processed = 0
     failed = 0
+    paused = 0
+    vision_remaining_by_batch: dict[str, int] = {}
     with connect() as conn:
         jobs = conn.execute(
             """
-            SELECT analysis_jobs.*, assets.file_uri, assets.original_name, assets.source_type, assets.upload_batch_id
+            SELECT analysis_jobs.*, assets.file_uri, assets.original_name, assets.source_type,
+                   assets.upload_batch_id, assets.asset_type, assets.quality_status, assets.duplicate_status
             FROM analysis_jobs
             JOIN assets ON assets.id = analysis_jobs.asset_id
             WHERE analysis_jobs.status IN ('queued', 'pending', 'failed')
@@ -297,8 +340,40 @@ def process_pending_jobs(limit: int = 5000) -> dict[str, Any]:
             )
             try:
                 asset = dict(job)
+                batch_id = job["upload_batch_id"]
+                if batch_id not in vision_remaining_by_batch:
+                    vision_remaining_by_batch[batch_id] = batch_vision_remaining(conn, batch_id)
+                asset["vision_budget_allowed"] = vision_remaining_by_batch[batch_id] > 0
                 analysis = analyze_asset(asset)
                 structured = analysis["structured_output"]
+                product_match = structured.get("product_match", {})
+                route = product_match.get("vision_route", {})
+                if route.get("decision") == "paused_budget":
+                    conn.execute(
+                        "UPDATE analysis_jobs SET status = 'paused', finished_at = ?, error_message = ? WHERE id = ?",
+                        (utc_now(), "Vision budget exhausted; manual confirmation required.", job["id"]),
+                    )
+                    conn.execute(
+                        "UPDATE asset_batches SET status = 'paused', vision_status = 'paused_budget', updated_at = ? WHERE id = ?",
+                        (utc_now(), batch_id),
+                    )
+                    enqueue_review_item(
+                        conn,
+                        item_type="analysis_job",
+                        item_id=job["id"],
+                        reason="low_confidence",
+                        confidence=0.0,
+                        payload={
+                            "asset_id": job["asset_id"],
+                            "vision_route": route,
+                            "message": "Vision budget exhausted; increase max_vision_calls_per_batch or confirm a larger run.",
+                        },
+                    )
+                    refresh_batch_progress(conn, batch_id)
+                    paused += 1
+                    continue
+                if product_match.get("vision_called") or product_match.get("openai_vision_called"):
+                    vision_remaining_by_batch[batch_id] = max(0, vision_remaining_by_batch[batch_id] - 1)
                 observation_id = str(uuid.uuid4())
                 conn.execute(
                     """
@@ -320,7 +395,6 @@ def process_pending_jobs(limit: int = 5000) -> dict[str, Any]:
                         utc_now(),
                     ),
                 )
-                product_match = structured.get("product_match", {})
                 if product_match.get("decision") == "review":
                     enqueue_review_item(
                         conn,
@@ -360,7 +434,24 @@ def process_pending_jobs(limit: int = 5000) -> dict[str, Any]:
                 )
                 refresh_batch_progress(conn, job["upload_batch_id"])
                 failed += 1
-    return {"processed": processed, "failed": failed}
+    return {"processed": processed, "failed": failed, "paused": paused}
+
+
+def batch_vision_remaining(conn, batch_id: str) -> int:
+    row = conn.execute(
+        """
+        SELECT vision_calls_used, openai_vision_calls_used, max_vision_calls_per_batch, estimated_cost, cost_limit
+        FROM asset_batches
+        WHERE id = ?
+        """,
+        (batch_id,),
+    ).fetchone()
+    if not row:
+        return 100
+    used = int(row["vision_calls_used"] if row["vision_calls_used"] is not None else row["openai_vision_calls_used"])
+    by_count = int(row["max_vision_calls_per_batch"]) - used
+    by_cost = int((float(row["cost_limit"]) - float(row["estimated_cost"])) / 0.002)
+    return max(0, min(by_count, by_cost))
 
 
 def latest_observations() -> list[dict[str, Any]]:

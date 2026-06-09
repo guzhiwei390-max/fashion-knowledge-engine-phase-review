@@ -26,6 +26,8 @@ from app.vision import classify_from_evidence, process_pending_jobs
 import app.vision as vision
 from app.visual import image_signature
 from app.openai_vision import parse_openai_response
+from app.vision_provider import analyze_image_with_provider, normalize_vision_result
+from app.vision_router import vision_route_decision
 from app.main import reserved_extensions, source_types as source_types_endpoint, pipelines_design
 
 
@@ -714,7 +716,7 @@ def test_product_structure_understanding_becomes_dna_evidence(isolated_db, tmp_p
     assert product_dna["zipper"]["value"] == "full front zipper"
     assert product_dna["logo_position"]["value"] == "left chest"
     assert product_dna["stitching"]["value"] == "curved panel stitching"
-    assert product_dna["back_structure"]["source"] == "openai_vision_structure"
+    assert product_dna["back_structure"]["source"] == "vision_structure"
     assert product_dna["sleeve_structure"]["value"] == "long fitted sleeves"
     assert product_dna["hem_shape"]["value"] == "straight hip hem"
     assert product_dna["fit_shape"]["value"] == "slim close fit"
@@ -747,6 +749,148 @@ def test_confidence_engine_central_thresholds():
     assert evaluate_match_confidence(confidence=0.72, has_official_match=True).reason == "low_confidence"
     assert evaluate_match_confidence(confidence=0.99, has_official_match=False).decision == "unknown"
     assert evaluate_match_confidence(confidence=0.99, has_official_match=True, conflict=True).reason == "conflict"
+
+
+def test_vision_provider_adapter_returns_unified_schema(monkeypatch, tmp_path):
+    monkeypatch.setenv("VISION_PROVIDER", "local")
+    image_path = tmp_path / "IMG_provider.png"
+    Image.new("RGB", (512, 512), (20, 20, 20)).save(image_path)
+
+    result = analyze_image_with_provider(str(image_path), [])
+
+    assert result["provider"] == "local"
+    assert result["product_match"]["candidate_only"] is True
+    assert "product_structure" in result
+    assert "multi_product" in result
+    assert result["product_match"]["result"] == "Unknown"
+
+
+def test_vision_provider_normalizes_mimo_like_response():
+    result = normalize_vision_result(
+        {
+            "result": "Known",
+            "product_match": {
+                "result": "Known",
+                "brand": "Alo",
+                "product_name": "Airbrush Legging",
+                "confidence": 0.81,
+                "why": ["candidate silhouette match"],
+            },
+            "product_structure": {"fit": "legging", "visible_evidence": ["legging fit"]},
+            "multi_product": {"result": "Unknown", "candidate_regions": [], "needs_region_review": False},
+            "quality": {"result": "Known", "issues": []},
+        },
+        "mimo",
+    )
+
+    assert result["provider"] == "mimo"
+    assert result["product_match"]["candidate_only"] is True
+    assert result["product_match"]["confidence"] == pytest.approx(0.81)
+    assert result["product_structure"]["fit_shape"] == "legging"
+
+
+def test_vision_router_blocks_nonvaluable_first_layer_inputs():
+    assert not vision_route_decision(
+        asset_type="low_quality",
+        quality_status="low_quality",
+        duplicate_status="unique",
+        has_official_candidate=False,
+        match_confidence=0.0,
+        needs_structure_detail=True,
+    )["allowed"]
+    assert not vision_route_decision(
+        asset_type="scene_photo",
+        quality_status="ok",
+        duplicate_status="unique",
+        has_official_candidate=False,
+        match_confidence=0.0,
+        needs_structure_detail=True,
+    )["allowed"]
+    duplicate_route = vision_route_decision(
+        asset_type="reality_product_photo",
+        quality_status="ok",
+        duplicate_status="near_duplicate",
+        has_official_candidate=True,
+        match_confidence=0.70,
+        needs_structure_detail=True,
+    )
+    assert duplicate_route["reason"] == "duplicate"
+
+
+def test_vision_budget_defaults_are_configurable(isolated_db, tmp_path, monkeypatch):
+    monkeypatch.setenv("MAX_VISION_CALLS_PER_BATCH", "50")
+    monkeypatch.setenv("VISION_COST_LIMIT", "0.10")
+    image_path = tmp_path / "IMG_budget.png"
+    Image.new("RGB", (512, 512), (90, 90, 90)).save(image_path)
+
+    assets.create_asset_record(
+        file_path=image_path,
+        original_name="IMG_budget.png",
+        content_type="image/png",
+        size_bytes=image_path.stat().st_size,
+        batch_id="budget-batch",
+    )
+
+    with database.connect() as conn:
+        batch = conn.execute("SELECT * FROM asset_batches WHERE id = 'budget-batch'").fetchone()
+    assert batch["max_vision_calls_per_batch"] == 50
+    assert batch["cost_limit"] == pytest.approx(0.10)
+
+
+def test_vision_budget_pauses_batch_before_excess_calls(isolated_db, tmp_path, monkeypatch):
+    monkeypatch.setenv("MAX_VISION_CALLS_PER_BATCH", "1")
+    monkeypatch.setenv("VISION_COST_LIMIT", "1.00")
+    calls = {"count": 0}
+
+    def fake_openai(*args, **kwargs):
+        calls["count"] += 1
+        return {
+            "result": "Known",
+            "product_match": {
+                "result": "Known",
+                "brand": "Alo",
+                "product_name": "Airbrush Legging",
+                "confidence": 0.88,
+                "why": ["candidate fit shape"],
+            },
+            "product_structure": {"fit_shape": "legging", "visible_evidence": ["legging fit"]},
+        }
+
+    monkeypatch.setattr(vision, "analyze_image_with_openai", fake_openai)
+    import_catalog_records(
+        [
+            {
+                "brand": "Alo",
+                "product_name": "Airbrush Legging",
+                "product_family": "Airbrush",
+                "variant": "Legging",
+                "category": "Leggings",
+            }
+        ]
+    )
+    first = tmp_path / "IMG_budget_1.png"
+    second = tmp_path / "IMG_budget_2.png"
+    make_solid_image(first, (30, 40, 50))
+    make_solid_image(second, (80, 90, 100))
+    for path in [first, second]:
+        assets.create_asset_record(
+            file_path=path,
+            original_name=path.name,
+            content_type="image/png",
+            size_bytes=path.stat().st_size,
+            batch_id="vision-budget-stop",
+        )
+
+    result = process_pending_jobs()
+
+    assert calls["count"] == 1
+    assert result["processed"] == 1
+    assert result["paused"] == 1
+    with database.connect() as conn:
+        batch = conn.execute("SELECT * FROM asset_batches WHERE id = 'vision-budget-stop'").fetchone()
+        paused_job = conn.execute("SELECT * FROM analysis_jobs WHERE status = 'paused'").fetchone()
+    assert batch["vision_status"] == "paused_budget"
+    assert paused_job is not None
 
 
 def test_low_confidence_match_enters_review_queue(isolated_db, tmp_path, monkeypatch):
@@ -899,8 +1043,10 @@ def test_architecture_decisions_doc_locks_phase1_rules():
         "Unknown First",
         "Official Truth Lock",
         "Official Truth > Reality Truth > Community Truth",
-        "Phase 1 禁止生成",
-        "Vision 不能创造不存在的产品",
+        "Phase 1 forbids",
+        "Vision is a secondary expert verification",
+        "Vision Provider Adapter",
+        "Vision Gate / Vision Router",
         "Brand Agnostic",
     ):
         assert phrase in text
@@ -912,8 +1058,8 @@ def test_project_north_star_defines_reality_image_engine_goal():
         "Reality Image Engine",
         "Product",
         "Scene",
-        "真实到像真人拍出来的照片",
-        "它是否能提高最终图片的真实性",
+        "Reality Image Engine",
+        "Product Recognition Engine",
         "Product Recognition Engine",
     ):
         assert phrase in text
@@ -925,4 +1071,4 @@ def test_project_north_star_defines_reality_image_engine_goal():
 
 
 def make_solid_image(path: Path, color: tuple[int, int, int]) -> None:
-    Image.new("RGB", (64, 64), color).save(path)
+    Image.new("RGB", (512, 512), color).save(path)

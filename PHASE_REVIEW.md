@@ -1,6 +1,6 @@
 # Current Version
 
-当前版本号：Phase 1 Production Ingestion Foundation v0.7
+当前版本号：Phase 1 Vision Provider Adapter v0.8
 
 当前 Commit Hash：pending until commit; see final response for exact hash
 
@@ -11,185 +11,111 @@
 # Added
 
 本次新增功能：
-
-- Brand-agnostic Product Structure Engine fields
-- Central Confidence Engine
-- Evidence Engine
-- Real Human Review Queue workflow foundation
-- Exact duplicate and near duplicate detection
-- Official product alias, family, variant, color alias storage
-- Expanded Official Product Assets for logo, zipper, hardware, stitching
-- Architecture decision log
-- Reserved database/API architecture for Success Library, Negative Library, Commercial Score, Trend Timeline, Region Layer, and Learning Feedback Loop
-- PROJECT_NORTH_STAR.md as the highest priority project goal document
-- Production batch ingestion foundation for 10,000+ mixed assets
-- Asset batch progress table and retry/pause/resume API
-- Ingestion metadata extraction: dimensions, EXIF, thumbnail, file hash, perceptual hash
-- Corrupted image handling without batch failure
-- Coarse Classification Engine for first-pass asset_type and quality_status
-- Multi-product photo region placeholder and review routing
-- Reality Pattern and video/frame extraction schema reservations
-- Regression tests for Unknown-first, confidence routing, evidence output, review queue, duplicate handling, and architecture rules
+- Vision Provider Adapter
+- 统一 Vision JSON schema
+- Vision Router / Vision Gate
+- Vision batch budget control
+- OpenAI / MiMo / Qwen-VL / Gemini / Local provider 配置入口
+- Local Vision fallback
+- Vision A/B 测试准备
+- 通用 vision_calls_used 批次统计字段
+- 批次 Vision budget 更新接口
+- Vision 路由测试、Provider schema 测试、预算暂停测试
 
 ---
 
 # Database Changes
 
 新增表：
-
-- success_library_items
-- negative_library_items
-- commercial_score_records
-- trend_timeline_events
-- region_layers
-- learning_feedback_events
-- asset_batches
-- asset_product_regions
-- material_reality_patterns
-- human_reality_patterns
-- scene_reality_patterns
-- moment_patterns
-- outfit_reality_patterns
-- reality_score_schema
-- video_assets
-- video_frame_assets
-- frame_extraction_jobs
+- 无新增业务表
 
 修改表：
+- asset_batches：新增 vision_calls_used
+- asset_batches：新增 max_vision_calls_per_batch
+- asset_batches：新增 cost_limit
+- asset_batches：新增 require_manual_confirm_before_large_vision_run
+- asset_batches：新增 vision_status
 
-- assets: added visual_signature, duplicate_of_asset_id, duplicate_status
-- review_queue: added review_payload, resolution_json, resolved_by, resolved_at
-- official_products: official_fields_json now captures official catalog identity fields during import
-- product_aliases: now populated during official catalog import for product names, aliases, and colors
-- official_product_assets: now supports official_logo, official_zipper, official_hardware, official_stitching
-- source_type_registry: added reserved_extension source type
-- assets: added ingestion_status, asset_type, quality_status, width, height, exif_json, thumbnail_uri
+保留兼容字段：
+- asset_batches.openai_vision_calls_used 保留为旧版本兼容字段，但新逻辑优先使用 vision_calls_used
 
 ---
 
 # API Changes
 
 新增接口：
-
-- GET /api/review-queue
-- POST /api/review-queue/{review_id}/resolve
-- GET /api/extensions/reserved
-- GET /api/batches/{batch_id}
-- POST /api/batches/{batch_id}/retry
-- POST /api/batches/{batch_id}/pause
-- POST /api/batches/{batch_id}/resume
+- POST /api/batches/{batch_id}/vision-budget
 
 修改接口：
-
-- POST /api/upload: now stores visual signatures and duplicate metadata
-- POST /api/upload: ordinary user uploads remain Reality Truth even if filenames contain "official"
-- POST /api/import/zip: now inherits duplicate, corruption, thumbnail, metadata, and coarse classification handling through asset creation
-- POST /api/jobs/process: now auto-enqueues Unknown and Low Confidence observations for human review
-- POST /api/catalog/import: now records product family, variant, aliases, color aliases, and expanded official asset types
-- GET /: admin UI now shows pending Human Review Queue
-- GET /api/pipelines/design: now includes reserved-only future module architecture
+- POST /api/jobs/process：Vision 调用前必须经过 Vision Router、预算判断、候选收窄、Confidence Engine、Evidence Engine、Review Queue
+- GET /api/batches：返回通用 vision_calls_used、vision_status、max_vision_calls_per_batch、estimated_cost
+- GET /：管理后台批次进度显示通用 Vision calls 和 Vision budget 状态
+- GET /api/pipelines/design：增加 vision_provider_adapter 架构信息
 
 ---
 
 # Architecture Changes
 
 本次架构调整：
-
-- Product recognition now routes through a central Confidence Engine.
-- Low-confidence matches no longer become hard product identities.
-- Visual hash/color signature matching is treated as an official visual prefilter and evidence input, not the sole business authority.
-- Evidence Engine now returns matched_because, evidence_asset_ids, matched_official_assets, confidence, and uncertain_fields.
-- Human Review Queue is active for Unknown, Low Confidence, Duplicate, and Near Duplicate.
-- Product Structure Engine is brand agnostic and covers collar, zipper, logo_position, stitching, back_structure, sleeve_structure, hem_shape, fit_shape, pocket, hardware, material_behavior.
-- OpenAI Vision remains a secondary verification/detail source and cannot create products outside Official Catalog.
-- Architecture rules are now recorded in ARCHITECTURE_DECISIONS.md.
-- PROJECT_NORTH_STAR.md now defines the final goal as Reality Image Engine, not Product Recognition Engine.
-- Existing Official Catalog, Official Assets, Product DNA, Structure DNA, Unknown, Confidence, Evidence, and Review Queue modules are explicitly preserved as correct Phase 1 foundations.
-- Production batch ingestion now treats real mixed material packages as the target input, not curated demo folders.
-- Files are preserved before processing; corrupted files enter review/status instead of crashing a batch.
-- Coarse classification happens before product identification.
-- Multi-product photos are not forced into one product and have region/candidate schema.
-- User upload filenames cannot create Official Truth.
-- Reality/Moment/Human/Scene and video structures are reserved for future realism learning.
-- Success Library, Negative Library, Commercial Score, Trend Timeline, Region Layer, and Learning Feedback Loop are reserved-only extension points.
-- Reserved future modules have database structure and API design entries, but no Phase 1 logic, pages, scoring, trend analysis, region algorithms, or feedback automation.
+- Vision 不再绑定 OpenAI，新增 provider adapter：openai、mimo、qwen_vl、gemini、local
+- Vision Provider 必须返回统一 schema：product_match、product_structure、multi_product、quality
+- Vision 不是第一层粗筛，第一层仍然是 Local Ingestion、Deduplication、Coarse Classification
+- Vision 只能验证 Official Catalog 候选，不能自由创造品牌、产品、配饰或分类
+- Vision 输出不能直接写入最终结果，必须经过 Confidence Engine、Evidence Engine、Review Queue
+- Vision Router 会跳过 duplicate、near duplicate、corrupted、low_quality、scene-only、高置信度本地匹配等不值得调用 Vision 的图片
+- 批次级预算控制支持 max_vision_calls_per_batch、cost_limit、require_manual_confirm_before_large_vision_run
+- 超过预算时批次进入 paused_budget，不继续调用 Vision
+- Product Structure DNA 的证据来源改为通用 vision_structure，保留 openai_vision_structure 兼容别名
+- 普通上传仍然默认 Reality Truth，文件名不能创建 Official Truth
 
 ---
 
 # What Works
 
 目前已经可以工作的功能：
-
-- Import official catalog records with product identity fields.
-- Store official visual assets for white background, model, detail, fabric, logo, zipper, hardware, and stitching references.
-- Store product aliases and color aliases to reduce duplicate product identity drift.
-- Upload unnamed images and match them against Official Catalog visual references.
-- Upload mixed batches while preserving originals, thumbnails, file hashes, perceptual hashes, dimensions, and EXIF.
-- Mark corrupted files without stopping the batch.
-- Coarse classify assets into reality_product_photo, human_wearing_photo, scene_photo, outfit_reference, multi_product_photo, low_quality, duplicate, or unknown.
-- Keep ordinary user uploads in Reality Truth regardless of filename.
-- Create multi-product region placeholders and route uncertain multi-product images to Review Queue.
-- Track batch progress with total_files, ingested, duplicated, corrupted, low_quality, coarse_classified, matched, unknown, review_needed, failed, OpenAI Vision calls, and estimated cost.
-- Retry, pause, and resume batch jobs.
-- Use OpenAI Vision only when matching is missing, low confidence, or structure evidence is needed.
-- Return Unknown when no official product match is proven.
-- Route low confidence product candidates to Human Review Queue.
-- Route exact duplicate and near duplicate uploads to Human Review Queue.
-- Generate Product DNA with brand-agnostic structure evidence.
-- Generate Garment Validation Rules from evidence-backed Product DNA.
-- Retrieve Product DNA, Material DNA, contextual DNA placeholders, and Knowledge Card.
-- Inspect reserved future extension architecture through GET /api/extensions/reserved.
-- Run automated tests: 34 passing.
+- 通过 VISION_PROVIDER 切换 openai / mimo / qwen_vl / gemini / local
+- 未配置远程 provider 时，local provider 返回 Unknown，不猜测
+- MiMo 类响应可以被标准化成统一 schema
+- Vision 调用前会先做本地 ingestion、去重、粗分类、候选收窄和预算判断
+- 低价值输入不会进入 Vision：duplicate、near duplicate、low_quality、scene_photo
+- 批次 Vision 调用达到上限后暂停，后续图片不继续调用 Vision
+- Vision 结果会保留 confidence、why、provider、vision_route
+- 低置信度仍然进入 Human Review Queue
+- Evidence Engine 仍然返回 matched_because、matched_official_assets、evidence_asset_ids、uncertain_fields
+- 39 个自动化测试通过
 
 ---
 
 # Known Limitations
 
 目前已知问题：
-
-- Official Catalog Importer remains conservative and may return Needs Manual Import for JS-heavy or access-restricted brand pages.
-- Visual matching still uses lightweight local signatures as a Phase 1 prefilter; production-grade embeddings are not implemented yet.
-- OpenAI Vision requires OPENAI_API_KEY; without it, structure fields stay Unknown unless official visual evidence is enough.
-- Near duplicate detection is simple and should be upgraded before very large production batches.
-- Human review resolution records decisions, but richer correction forms and active learning UI are still minimal.
-- Official visual references do not imply commercial usage rights; they are identification references only.
-- Community Truth ingestion remains reserved, not active.
-- Success Library, Negative Library, Commercial Score, Trend Timeline, Region Layer, and Learning Feedback Loop are schema/API reservations only and intentionally inactive.
-- Folder upload is represented in reserved API design, but there is not yet a separate browser folder upload endpoint beyond multi-file upload and zip import.
-- Multi-product region detection has schema and review routing, but does not yet crop product regions automatically.
-- Batch queue is SQLite-backed and suitable for Phase 1 foundation; a production worker system can replace it later without changing core data contracts.
+- MiMo、Qwen-VL、Gemini 当前通过通用 HTTP endpoint 适配，具体厂商 payload 可能还需要按实际 API 文档细化
+- Vision 成本估算仍是 Phase 1 粗估，每次调用按固定单价估算
+- Vision A/B 测试框架已经可接入，但还没有独立的 A/B 报告页面
+- 本地 visual matching 仍是轻量预筛选，不是生产级 embedding 检索
+- Multi-product 图片仍然只有 region/candidate 结构预留和 Review Queue 路由，还没有稳定自动切图
+- Human Review UI 仍是基础版本，适合验证工作流，但还不是高效率生产审核台
 
 ---
 
 # Next Recommended Step
 
 我建议下一步开发：
-
-- Add product-level visual reference scoring that combines multiple official assets per product.
-- Add manual review resolution that can promote corrected Reality Truth into future matching hints without overwriting Official Truth.
-- Add richer Official Catalog category-page extraction for common structured product-list patterns.
-- Add stronger near-duplicate clustering for large batches.
-- Add product variant and color confidence evidence in Product DNA.
-- Keep future growth modules inactive until product recognition quality is stable.
-- Evaluate every future feature against one question: does it improve final image realism?
-- Add stronger worker execution for long-running 10,000+ image batches after ingestion contracts stabilize.
+- 加一个 Vision A/B evaluation runner，用 50-100 张图片对 OpenAI 和 MiMo 比较准确率、结构识别、多商品识别、JSON 稳定性、速度和成本
+- 增强 Official Product Visual Reference 的多图综合评分
+- 增强 Human Review 修正入口，让人工修正能更清晰地回写 Reality Truth 和匹配提示
+- 对 1,000 张测试 zip 做真实批量导入压测，观察 paused_budget、review_needed、unknown、duplicate 的比例
 
 ---
 
 # Review Focus
 
 请重点审查：
-
-- 是否严格遵守 Unknown-first，不猜、不脑补、不创造产品。
-- Confidence Engine 阈值是否合理，是否所有识别都统一走中央判断。
-- Evidence Engine 是否足够解释“为什么是这个产品”。
-- Human Review Queue 是否覆盖 Unknown、Low Confidence、Duplicate、Near Duplicate。
-- Official Truth Lock 是否没有被 Reality Truth 或 Community Truth 覆盖。
-- Product Structure Engine 是否品牌无关，而不是围绕 Define 特化。
-- Phase 1 是否没有引入 AI 生图、换装、模特、场景生成、扩图或内容生成。
-- Success Library、Negative Library、Commercial Score、Trend Timeline、Region Layer、Learning Feedback Loop 是否只做了预留，没有提前实现逻辑、页面或算法。
-- PROJECT_NORTH_STAR.md 是否清楚规定项目最终目标是 Reality Image Engine，而不是 Product Recognition Engine。
-- 是否能真实导入 10,000 张混合素材而不因单张失败中断。
-- 用户上传文件名是否不会污染 Official Truth。
-- 多商品图片是否没有被强行识别为单个产品。
-- Batch Progress 是否足够透明，能看到 corrupted、duplicate、low_quality、review_needed、Vision calls 和 estimated cost。
+- Vision Provider Adapter 是否真的没有把 OpenAI 写死为唯一模型
+- Vision Router 是否严格保证 Vision 不是第一层入口
+- Vision 是否只能验证候选，不能创造新产品
+- 统一 JSON schema 是否足够支持 OpenAI / MiMo / Qwen-VL / Gemini / Local
+- Vision 输出是否仍然经过 Confidence Engine、Evidence Engine、Review Queue
+- 批次预算控制是否能防止 1,000 或 10,000 张图片默认全部发送给 Vision
+- Product Structure DNA 是否保持品牌无关
+- Official Truth Lock、Unknown First、Phase 1 禁止生成是否没有被破坏

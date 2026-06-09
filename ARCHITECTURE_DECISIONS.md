@@ -48,9 +48,59 @@ Phase 1 exists to build the learning system:
 
 ## Vision 不能创造不存在的产品
 
-OpenAI Vision is a secondary verification and structure-detail source. It cannot create a product that does not exist in the Official Product Catalog.
+Vision is a secondary expert verification and structure-detail source. It cannot create a product that does not exist in the Official Product Catalog.
 
 If Vision sees a possible product but the product cannot be mapped back to `official_products`, the result must be `Unknown`.
+
+Vision can explain evidence, compare candidates, and identify uncertain structure fields, but it cannot invent brands, products, accessories, categories, colors, or variants.
+
+## Vision Provider Adapter
+
+Vision must be provider-agnostic.
+
+Supported provider keys:
+
+- `openai`
+- `mimo`
+- `qwen_vl`
+- `gemini`
+- `local`
+
+Required configuration:
+
+- `VISION_PROVIDER`
+- `MAX_VISION_CALLS_PER_BATCH`
+- `VISION_COST_LIMIT`
+- `VISION_REQUIRE_CONFIRM_ABOVE`
+
+Every provider must return the same JSON schema:
+
+- `product_match`
+- `product_structure`
+- `multi_product`
+- `quality`
+
+Provider output is never final truth. It must pass through Confidence Engine, Evidence Engine, and Review Queue routing.
+
+## Vision Gate / Vision Router
+
+OpenAI Vision, MiMo, Qwen-VL, Gemini, or any future model must not be the first layer of recognition.
+
+The processing order is:
+
+1. Local Ingestion
+2. Local Deduplication
+3. Local Coarse Classification
+4. Official Catalog candidate narrowing
+5. Vision Router decision
+6. Provider-specific Vision call only when allowed
+7. Confidence Engine
+8. Evidence Engine
+9. Review Queue or accepted match
+
+Vision calls are blocked for duplicate, near duplicate, corrupted, low quality, obvious scene-only, and high-confidence local matches that do not need structure detail.
+
+Vision calls are budget-controlled per batch. When the batch exceeds its configured call or cost limit, the batch pauses instead of continuing to call remote models.
 
 ## Brand Agnostic
 
@@ -110,5 +160,3 @@ Ordinary user uploads default to Reality Truth. A filename containing words such
 Local hashes, thumbnails, EXIF, dimensions, and coarse classification are ingestion infrastructure. They can prefilter and organize work, but they must not become final product identity.
 
 Multi-product photos must not be forced into a single product match. They require region/candidate structures and review when uncertain.
-
-OpenAI Vision must remain layered behind local ingestion, deduplication, coarse classification, and Official Catalog candidate narrowing.

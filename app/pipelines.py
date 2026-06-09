@@ -120,6 +120,7 @@ RESERVED_API_DESIGN: dict[str, Any] = {
         "POST /api/batches/{batch_id}/retry",
         "POST /api/batches/{batch_id}/pause",
         "POST /api/batches/{batch_id}/resume",
+        "POST /api/batches/{batch_id}/vision-budget",
     ],
     "reserved_future_endpoints": {
         PIPELINE_INTERNAL_UPLOAD: [
@@ -148,6 +149,23 @@ RESERVED_API_DESIGN: dict[str, Any] = {
             "POST /api/future/video-assets",
             "POST /api/future/frame-extraction-jobs",
         ],
+    },
+    "vision_provider_adapter": {
+        "providers": ["openai", "mimo", "qwen_vl", "gemini", "local"],
+        "environment": [
+            "VISION_PROVIDER",
+            "MAX_VISION_CALLS_PER_BATCH",
+            "VISION_COST_LIMIT",
+            "VISION_REQUIRE_CONFIRM_ABOVE",
+        ],
+        "unified_schema": [
+            "product_match",
+            "product_structure",
+            "multi_product",
+            "quality",
+        ],
+        "rule": "Vision providers are expert verification adapters, not first-layer classifiers.",
+        "ab_test_ready": True,
     },
     "status": "reserved_only",
 }
@@ -212,5 +230,6 @@ def pipeline_design() -> dict[str, Any]:
         "source_types": SOURCE_TYPES,
         "reserved_extension_modules": RESERVED_EXTENSION_MODULES,
         "api_design": RESERVED_API_DESIGN,
+        "vision_provider_adapter": RESERVED_API_DESIGN["vision_provider_adapter"],
         "rule": "Official Truth can be supplemented but not overwritten by Reality Truth or Community Truth.",
     }
