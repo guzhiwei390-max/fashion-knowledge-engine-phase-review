@@ -8,7 +8,9 @@ from app.catalog import (
     add_official_visual_reference,
     catalog_count,
     determine_import_type,
+    extract_category_links_from_html,
     extract_catalog_records_from_html,
+    import_catalog_tree_from_html_pages,
     import_catalog_records,
     match_official_product,
     match_official_product_by_visual_signature,
@@ -17,10 +19,12 @@ from app.catalog import (
 )
 from app.database import init_db
 from app.knowledge import build_knowledge, search_knowledge
+from app.pipelines import PIPELINE_EXTERNAL_KNOWLEDGE, PIPELINE_INTERNAL_UPLOAD, TRUTH_OFFICIAL, TRUTH_REALITY, pipeline_design
 from app.vision import classify_from_evidence, process_pending_jobs
 import app.vision as vision
 from app.visual import image_signature
 from app.openai_vision import parse_openai_response
+from app.main import source_types as source_types_endpoint, pipelines_design
 
 
 @pytest.fixture()
@@ -40,6 +44,72 @@ def test_upload_gate_requires_official_catalog(isolated_db):
     with pytest.raises(Exception) as exc:
         require_catalog_ready()
     assert "Official Product Catalog" in str(exc.value)
+
+
+def test_pipeline_schema_is_reserved_without_enabling_external_ingestion(isolated_db):
+    with database.connect() as conn:
+        tables = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        }
+        asset_columns = {row["name"] for row in conn.execute("PRAGMA table_info(assets)").fetchall()}
+        product_columns = {row["name"] for row in conn.execute("PRAGMA table_info(official_products)").fetchall()}
+        source_types = {
+            row["source_type"]: dict(row)
+            for row in conn.execute("SELECT * FROM source_type_registry").fetchall()
+        }
+
+    assert {
+        "source_type_registry",
+        "ingestion_sources",
+        "pipeline_runs",
+        "external_knowledge_items",
+        "review_queue",
+        "product_aliases",
+        "knowledge_source_index",
+    }.issubset(tables)
+    assert {"pipeline_type", "truth_layer", "source_id", "external_ref_uri", "ingestion_metadata"}.issubset(asset_columns)
+    assert {"product_family", "variant", "truth_layer", "truth_locked", "official_fields_json", "supplemental_fields_json"}.issubset(product_columns)
+    assert source_types["internal_upload_image"]["pipeline_type"] == PIPELINE_INTERNAL_UPLOAD
+    assert source_types["external_knowledge_url"]["pipeline_type"] == PIPELINE_EXTERNAL_KNOWLEDGE
+    assert source_types["official_catalog_import"]["truth_layer"] == TRUTH_OFFICIAL
+    assert pipeline_design()["rule"] == "Official Truth can be supplemented but not overwritten by Reality Truth or Community Truth."
+
+
+def test_knowledge_tables_have_truth_pipeline_markers(isolated_db):
+    with database.connect() as conn:
+        dna_columns = {row["name"] for row in conn.execute("PRAGMA table_info(dna_records)").fetchall()}
+        card_columns = {row["name"] for row in conn.execute("PRAGMA table_info(knowledge_cards)").fetchall()}
+        query_columns = {row["name"] for row in conn.execute("PRAGMA table_info(retrieval_queries)").fetchall()}
+
+    assert {"source_type", "pipeline_type", "truth_layer"}.issubset(dna_columns)
+    assert {"source_type", "pipeline_type", "truth_layer"}.issubset(card_columns)
+    assert {"pipeline_type", "truth_layer"}.issubset(query_columns)
+
+
+def test_pipeline_api_design_is_read_only_reservation(isolated_db):
+    design = pipelines_design()
+    registry = source_types_endpoint()
+
+    assert design["api_design"]["status"] == "reserved_only"
+    assert "POST /api/external/sources" in design["api_design"]["reserved_future_endpoints"][PIPELINE_EXTERNAL_KNOWLEDGE]
+    assert any(item["source_type"] == "external_social_capture" for item in registry["source_types"])
+
+
+def test_internal_upload_assets_have_reserved_pipeline_fields(isolated_db, tmp_path):
+    image_path = tmp_path / "IMG_0001.png"
+    make_solid_image(image_path, (1, 2, 3))
+
+    asset = assets.create_asset_record(
+        file_path=image_path,
+        original_name="IMG_0001.png",
+        content_type="image/png",
+        size_bytes=image_path.stat().st_size,
+        batch_id="pipeline-batch",
+    )
+
+    assert asset["pipeline_type"] == PIPELINE_INTERNAL_UPLOAD
+    assert asset["truth_layer"] == TRUTH_REALITY
 
 
 def test_catalog_import_and_match_are_evidence_based(isolated_db):
@@ -201,6 +271,43 @@ def test_category_page_extracts_item_list_products():
     assert extracted["page_type"] == "catalog_page"
     assert len(extracted["records"]) == 2
     assert extracted["records"][1]["product_name"] == "Dance Studio Pant"
+
+
+def test_category_tree_import_collects_same_site_category_pages(isolated_db):
+    root_url = "https://shop.example.com/c/women"
+    pages = {
+        root_url: """
+        <html><body>
+          <a href="/c/women-jackets">Women Jackets</a>
+          <a href="https://other.example.com/c/copy">External Copy</a>
+          <script type="application/ld+json">
+          {"@type":"ItemList","itemListElement":[
+            {"@type":"ListItem","item":{"@type":"Product","name":"Lululemon Align Pant","category":"Women Pants","image":"https://shop.example.com/align.jpg","url":"https://shop.example.com/products/align"}}
+          ]}
+          </script>
+        </body></html>
+        """,
+        "https://shop.example.com/c/women-jackets": """
+        <html><body>
+          <script type="application/ld+json">
+          [
+            {"@type":"Product","name":"Lululemon Define Jacket","category":"Women Jackets","image":"https://shop.example.com/define.jpg","url":"https://shop.example.com/products/define"},
+            {"@type":"Product","name":"Lululemon Scuba Hoodie","category":"Women Hoodies","image":"https://shop.example.com/scuba.jpg","url":"https://shop.example.com/products/scuba"}
+          ]
+          </script>
+        </body></html>
+        """,
+    }
+
+    links = extract_category_links_from_html(pages[root_url], root_url)
+    result = import_catalog_tree_from_html_pages(pages, root_url, "Lululemon", max_pages=5)
+
+    assert "https://shop.example.com/c/women-jackets" in links
+    assert "https://other.example.com/c/copy" not in links
+    assert result["import_type"] == "catalog_tree_import"
+    assert result["pages_read"] == 2
+    assert result["imported"] == 3
+    assert catalog_count() == 3
 
 
 def test_img_named_upload_matches_official_visual_reference(isolated_db, tmp_path):
@@ -404,8 +511,10 @@ def test_openai_vision_response_extracts_product_structure():
             "zipper": "full front zipper",
             "sleeve": "long sleeve",
             "logo": "small chest logo",
+            "logo_position": "left chest",
             "back_structure": "curved seam",
             "material_visual_behavior": "low shine",
+            "material_behavior": "low shine",
             "fit": "slim",
             "visible_evidence": ["stand collar", "full zipper"]
           }
@@ -417,6 +526,66 @@ def test_openai_vision_response_extracts_product_structure():
 
     assert parsed["product_match"]["product_name"] == "Define Jacket"
     assert parsed["product_structure"]["zipper"] == "full front zipper"
+    assert parsed["product_structure"]["logo_position"] == "left chest"
+
+
+def test_product_structure_understanding_becomes_dna_evidence(isolated_db, tmp_path, monkeypatch):
+    def fake_openai(*args, **kwargs):
+        return {
+            "result": "Known",
+            "product_match": {
+                "result": "Known",
+                "brand": "Lululemon",
+                "product_name": "Define Jacket",
+                "confidence": 0.91,
+                "why": ["stand collar", "full front zipper", "left chest logo"],
+            },
+            "product_structure": {
+                "garment_type": "jacket",
+                "collar": "stand collar",
+                "zipper": "full front zipper",
+                "logo_position": "left chest",
+                "back_structure": "curved back seam",
+                "material_behavior": "low shine, smooth stretch knit",
+                "visible_evidence": ["stand collar", "full front zipper", "left chest logo", "curved back seam"],
+                "unknown_fields": [],
+            },
+        }
+
+    monkeypatch.setattr(vision, "analyze_image_with_openai", fake_openai)
+    import_catalog_records(
+        [
+            {
+                "brand": "Lululemon",
+                "product_name": "Define Jacket",
+                "aliases": "Define",
+                "category": "Jacket",
+                "material": "Nulu",
+            }
+        ]
+    )
+    image_path = tmp_path / "IMG_5555.png"
+    make_solid_image(image_path, (80, 80, 80))
+    asset = assets.create_asset_record(
+        file_path=image_path,
+        original_name="IMG_5555.png",
+        content_type="image/png",
+        size_bytes=image_path.stat().st_size,
+        batch_id="structure-batch",
+    )
+
+    assert asset["id"]
+    assert process_pending_jobs()["processed"] == 1
+    assert build_knowledge()["built"] == 1
+    result = search_knowledge({"brand": "Lululemon", "product": "Define Jacket"})
+    product_dna = result["product_dna"]
+
+    assert product_dna["collar"]["value"] == "stand collar"
+    assert product_dna["zipper"]["value"] == "full front zipper"
+    assert product_dna["logo_position"]["value"] == "left chest"
+    assert product_dna["back_structure"]["source"] == "openai_vision_structure"
+    assert product_dna["material_behavior"]["value"] == "low shine, smooth stretch knit"
+    assert "collar: stand collar" in product_dna["must_have"]
 
 
 def make_solid_image(path: Path, color: tuple[int, int, int]) -> None:

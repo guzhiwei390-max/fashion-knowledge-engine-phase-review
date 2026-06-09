@@ -9,6 +9,7 @@ from fastapi import HTTPException, UploadFile
 
 from .config import ALLOWED_IMAGE_EXTENSIONS, MAX_UPLOAD_BYTES, UPLOAD_DIR
 from .database import connect, utc_now
+from .pipelines import PIPELINE_INTERNAL_UPLOAD, TRUTH_COMMUNITY, TRUTH_OFFICIAL, TRUTH_REALITY
 
 
 def is_allowed_image(filename: str) -> bool:
@@ -40,6 +41,14 @@ def knowledge_layer_from_source(source_type: str) -> str:
     if source_type in {"social"}:
         return "community"
     return "user_reality"
+
+
+def truth_layer_from_source(source_type: str) -> str:
+    if source_type == "official":
+        return TRUTH_OFFICIAL
+    if source_type == "social":
+        return TRUTH_COMMUNITY
+    return TRUTH_REALITY
 
 
 def sha256_file(path: Path) -> str:
@@ -87,6 +96,7 @@ def create_asset_record(
 
     source_type = source_type_from_name(original_name)
     knowledge_layer = knowledge_layer_from_source(source_type)
+    truth_layer = truth_layer_from_source(source_type)
 
     with connect() as conn:
         duplicate = conn.execute(
@@ -102,9 +112,10 @@ def create_asset_record(
             """
             INSERT INTO assets (
                 id, file_uri, original_name, sha256, content_type, size_bytes,
-                source_type, knowledge_layer, upload_batch_id, created_at
+                source_type, knowledge_layer, pipeline_type, truth_layer,
+                ingestion_metadata, upload_batch_id, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)
             """,
             (
                 asset_id,
@@ -115,6 +126,8 @@ def create_asset_record(
                 size_bytes,
                 source_type,
                 knowledge_layer,
+                PIPELINE_INTERNAL_UPLOAD,
+                truth_layer,
                 batch_id,
                 now,
             ),
@@ -138,6 +151,8 @@ def create_asset_record(
         "size_bytes": size_bytes,
         "source_type": source_type,
         "knowledge_layer": knowledge_layer,
+        "pipeline_type": PIPELINE_INTERNAL_UPLOAD,
+        "truth_layer": truth_layer,
         "upload_batch_id": batch_id,
         "created_at": now,
     }

@@ -3,6 +3,8 @@ from collections import defaultdict
 from typing import Any
 
 from .database import connect, decode_json, encode_json, utc_now
+from .pipelines import PIPELINE_INTERNAL_UPLOAD, TRUTH_REALITY
+from .structure import STRUCTURE_EVIDENCE_FIELDS, empty_structure_evidence, merge_structure_evidence
 from .unknown import UNKNOWN, unknown_response
 
 
@@ -45,11 +47,15 @@ def build_knowledge() -> dict[str, Any]:
                 conn.execute(
                     """
                     INSERT INTO dna_records (
-                        id, dna_type, subject_key, dna_json, evidence_asset_ids,
+                        id, dna_type, subject_key, source_type, pipeline_type, truth_layer,
+                        dna_json, evidence_asset_ids,
                         unknown_fields, created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, 'internal_upload_image', ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(dna_type, subject_key) DO UPDATE SET
+                        source_type = excluded.source_type,
+                        pipeline_type = excluded.pipeline_type,
+                        truth_layer = excluded.truth_layer,
                         dna_json = excluded.dna_json,
                         evidence_asset_ids = excluded.evidence_asset_ids,
                         unknown_fields = excluded.unknown_fields,
@@ -59,6 +65,8 @@ def build_knowledge() -> dict[str, Any]:
                         str(uuid.uuid4()),
                         dna_type,
                         subject_key,
+                        PIPELINE_INTERNAL_UPLOAD,
+                        TRUTH_REALITY,
                         encode_json(dna_json),
                         encode_json(evidence_asset_ids),
                         encode_json(dna_json.get("unknown_fields", [])),
@@ -69,11 +77,14 @@ def build_knowledge() -> dict[str, Any]:
             conn.execute(
                 """
                 INSERT INTO knowledge_cards (
-                    id, knowledge_type, brand, product_name, card_json,
+                    id, knowledge_type, brand, product_name, source_type, pipeline_type, truth_layer, card_json,
                     evidence_asset_ids, unknown_fields, created_at, updated_at
                 )
-                VALUES (?, 'ProductKnowledgeCard', ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, 'ProductKnowledgeCard', ?, ?, 'internal_upload_image', ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(knowledge_type, brand, product_name) DO UPDATE SET
+                    source_type = excluded.source_type,
+                    pipeline_type = excluded.pipeline_type,
+                    truth_layer = excluded.truth_layer,
                     card_json = excluded.card_json,
                     evidence_asset_ids = excluded.evidence_asset_ids,
                     unknown_fields = excluded.unknown_fields,
@@ -83,6 +94,8 @@ def build_knowledge() -> dict[str, Any]:
                     str(uuid.uuid4()),
                     brand,
                     product_name,
+                    PIPELINE_INTERNAL_UPLOAD,
+                    TRUTH_REALITY,
                     encode_json(knowledge_card),
                     encode_json(evidence_asset_ids),
                     encode_json(unknown_fields),
@@ -104,39 +117,54 @@ def build_product_dna(brand: str, product_name: str, observations: list[dict[str
     })
     unknown_fields: set[str] = set()
 
-    def verified_when(field: str, predicate: bool) -> str:
-        if predicate:
-            return "Verified"
-        unknown_fields.add(field)
-        return UNKNOWN
-
     structure = merge_product_structure(structured_items)
+    structure_evidence = merge_observation_structure_evidence(observations)
     product_dna = {
         "brand": brand,
         "product_name": product_name,
         "category": first_known(structured_items, "category", unknown_fields),
         "material": first_known(structured_items, "material", unknown_fields),
-        "fit": UNKNOWN,
-        "collar": verified_when("collar", "collar_detail" in asset_types),
-        "zipper": verified_when("zipper", "zipper_detail" in asset_types),
-        "logo": verified_when("logo", "logo_detail" in asset_types),
-        "back_structure": verified_when("back_structure", "back" in asset_types),
+        "fit": evidence_or_unknown("fit", structure, unknown_fields),
+        "collar": evidence_or_unknown("collar", structure_evidence, unknown_fields),
+        "zipper": evidence_or_unknown("zipper", structure_evidence, unknown_fields),
+        "logo_position": evidence_or_unknown("logo_position", structure_evidence, unknown_fields),
+        "back_structure": evidence_or_unknown("back_structure", structure_evidence, unknown_fields),
+        "material_behavior": evidence_or_unknown("material_behavior", structure_evidence, unknown_fields),
         "product_structure": structure,
+        "structure_evidence": structure_evidence,
         "must_have": must_have_from_structure(structure),
         "evidence_asset_ids": evidence_asset_ids,
         "evidence_count": len(evidence_asset_ids),
         "unknown_fields": [],
     }
 
-    for field in ("fit",):
-        unknown_fields.add(field)
+    for field in STRUCTURE_EVIDENCE_FIELDS:
+        if structure_evidence.get(field, {}).get("result") != "Known":
+            unknown_fields.add(field)
     product_dna["unknown_fields"] = sorted(unknown_fields)
     return product_dna
 
 
+def evidence_or_unknown(
+    field: str,
+    source: dict[str, Any],
+    unknown_fields: set[str],
+) -> Any:
+    value = source.get(field)
+    if isinstance(value, dict):
+        if value.get("result") == "Known" and _known(value.get("value")):
+            return value
+        unknown_fields.add(field)
+        return empty_structure_evidence().get(field, UNKNOWN)
+    if _known(value):
+        return value
+    unknown_fields.add(field)
+    return UNKNOWN
+
+
 def must_have_from_structure(structure: dict[str, Any]) -> list[str]:
     must_have: list[str] = []
-    for field in ("garment_type", "collar", "zipper", "sleeve", "logo", "back_structure", "material_visual_behavior", "fit"):
+    for field in ("garment_type", "collar", "zipper", "sleeve", "logo_position", "back_structure", "material_behavior", "fit"):
         value = structure.get(field)
         if value not in (None, "", UNKNOWN):
             must_have.append(f"{field}: {value}")
@@ -148,11 +176,24 @@ def merge_product_structure(structured_items: list[dict[str, Any]]) -> dict[str,
         "visible_evidence": [],
         "unknown_fields": [],
     }
-    fields = ["garment_type", "collar", "zipper", "sleeve", "logo", "back_structure", "material_visual_behavior", "fit"]
+    fields = [
+        "garment_type",
+        "collar",
+        "zipper",
+        "sleeve",
+        "logo_position",
+        "back_structure",
+        "material_behavior",
+        "fit",
+    ]
     for field in fields:
         merged[field] = UNKNOWN
     for item in structured_items:
         structure = item.get("product_structure") or {}
+        if structure.get("logo_position") in (None, "", UNKNOWN) and structure.get("logo") not in (None, "", UNKNOWN):
+            structure["logo_position"] = structure["logo"]
+        if structure.get("material_behavior") in (None, "", UNKNOWN) and structure.get("material_visual_behavior") not in (None, "", UNKNOWN):
+            structure["material_behavior"] = structure["material_visual_behavior"]
         for field in fields:
             if merged[field] == UNKNOWN and structure.get(field) not in (None, "", UNKNOWN):
                 merged[field] = structure[field]
@@ -160,6 +201,16 @@ def merge_product_structure(structured_items: list[dict[str, Any]]) -> dict[str,
     merged["visible_evidence"] = sorted(set(str(item) for item in merged["visible_evidence"] if item))
     merged["unknown_fields"] = [field for field in fields if merged[field] == UNKNOWN]
     return merged
+
+
+def merge_observation_structure_evidence(observations: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    evidence_items = []
+    for item in observations:
+        structured = item["structured_output"]
+        evidence = structured.get("structure_evidence")
+        if evidence:
+            evidence_items.append(evidence)
+    return merge_structure_evidence(evidence_items)
 
 
 def build_dna_suite(
@@ -177,6 +228,7 @@ def build_dna_suite(
             "brand": brand,
             "product_name": product_name,
             "material": product_dna.get("material", UNKNOWN),
+            "material_behavior": product_dna.get("material_behavior", empty_structure_evidence()["material_behavior"]),
             "reflection": UNKNOWN,
             "texture": UNKNOWN,
             "compression": UNKNOWN,
@@ -195,7 +247,7 @@ def build_dna_suite(
 def build_garment_validation_rules(product_dna: dict[str, Any], evidence_asset_ids: list[str]) -> dict[str, Any]:
     structure = product_dna.get("product_structure", {})
     must_have = []
-    for field in ("garment_type", "collar", "zipper", "sleeve", "logo", "back_structure", "material_visual_behavior", "fit"):
+    for field in ("garment_type", "collar", "zipper", "sleeve", "logo_position", "back_structure", "material_behavior", "fit"):
         value = structure.get(field)
         if value not in (None, "", UNKNOWN):
             must_have.append(f"{field}: {value}")
@@ -205,8 +257,8 @@ def build_garment_validation_rules(product_dna: dict[str, Any], evidence_asset_i
             must_have.append(f"{field}: {value}")
     unknown_fields = [
         field
-        for field in ("collar", "zipper", "logo", "back_structure", "material", "category")
-        if product_dna.get(field) in (None, "", UNKNOWN)
+        for field in ("collar", "zipper", "logo_position", "back_structure", "material_behavior", "material", "category")
+        if product_dna_field_unknown(product_dna.get(field))
     ]
     return {
         "product": product_dna["product_name"],
@@ -225,6 +277,12 @@ def build_garment_validation_rules(product_dna: dict[str, Any], evidence_asset_i
         "evidence_asset_ids": evidence_asset_ids,
         "unknown_fields": sorted(unknown_fields),
     }
+
+
+def product_dna_field_unknown(value: Any) -> bool:
+    if isinstance(value, dict):
+        return value.get("result") != "Known"
+    return value in (None, "", UNKNOWN)
 
 
 def empty_context_dna(brand: str, product_name: str, dna_type: str, evidence_asset_ids: list[str]) -> dict[str, Any]:
@@ -332,7 +390,13 @@ def log_query(conn, query: dict[str, Any], result: dict[str, Any], returned_unkn
         INSERT INTO retrieval_queries (id, query_json, result_json, returned_unknown, created_at)
         VALUES (?, ?, ?, ?, ?)
         """,
-        (str(uuid.uuid4()), encode_json(query), encode_json(result), 1 if returned_unknown else 0, utc_now()),
+        (
+            str(uuid.uuid4()),
+            encode_json(query),
+            encode_json(result),
+            1 if returned_unknown else 0,
+            utc_now(),
+        ),
     )
 
 

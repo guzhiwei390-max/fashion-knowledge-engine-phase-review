@@ -47,8 +47,10 @@ def empty_product_structure() -> dict[str, Any]:
         "zipper": UNKNOWN,
         "sleeve": UNKNOWN,
         "logo": UNKNOWN,
+        "logo_position": UNKNOWN,
         "back_structure": UNKNOWN,
         "material_visual_behavior": UNKNOWN,
+        "material_behavior": UNKNOWN,
         "fit": UNKNOWN,
         "visible_evidence": [],
         "unknown_fields": [
@@ -57,8 +59,10 @@ def empty_product_structure() -> dict[str, Any]:
             "zipper",
             "sleeve",
             "logo",
+            "logo_position",
             "back_structure",
             "material_visual_behavior",
+            "material_behavior",
             "fit",
         ],
     }
@@ -85,6 +89,7 @@ def analyze_image_with_openai(file_uri: str, official_candidates: list[dict[str,
             "Use only visible image evidence and provided official catalog candidates.",
             "Do not guess a product. If uncertain, set product_match.result to Unknown.",
             "Explain why the product matches using visible garment structure.",
+            "For structure, detect collar, zipper, logo position, back structure, and material behavior only when visible.",
             "Return JSON only.",
         ],
         "official_candidates": candidate_summary,
@@ -154,6 +159,10 @@ def parse_openai_response(payload: dict[str, Any]) -> dict[str, Any]:
 def normalize_product_structure(value: dict[str, Any]) -> dict[str, Any]:
     structure = empty_product_structure()
     structure.update({key: item for key, item in value.items() if key in structure})
+    if structure.get("logo_position") in (None, "", UNKNOWN) and structure.get("logo") not in (None, "", UNKNOWN):
+        structure["logo_position"] = structure["logo"]
+    if structure.get("material_behavior") in (None, "", UNKNOWN) and structure.get("material_visual_behavior") not in (None, "", UNKNOWN):
+        structure["material_behavior"] = structure["material_visual_behavior"]
     unknown_fields = [
         key
         for key, item in structure.items()

@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import tempfile
+import asyncio
 import urllib.parse
 import urllib.robotparser
 from html.parser import HTMLParser
@@ -25,6 +26,8 @@ USER_AGENT = "FashionKnowledgeEnginePhase1/0.1 (+manual-catalog-import)"
 VISUAL_MATCH_THRESHOLD = 0.88
 MAX_CATEGORY_PRODUCTS = 80
 MAX_OFFICIAL_IMAGES_PER_PRODUCT = 6
+MAX_CATEGORY_TREE_PAGES = 12
+CATEGORY_TREE_DELAY_SECONDS = 0.75
 
 
 def normalize(value: str) -> str:
@@ -124,6 +127,128 @@ async def import_catalog_url(url: str, brand: str, expected_page_type: str = "ca
         imported["result"] = "Needs Manual Import"
         imported["reason"] = "catalog data imported but no official visual reference could be created"
     return imported
+
+
+async def import_catalog_tree_url(url: str, brand: str, max_pages: int = MAX_CATEGORY_TREE_PAGES) -> dict[str, Any]:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"https", "http"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="A public http(s) category URL is required")
+    if max_pages < 1 or max_pages > MAX_CATEGORY_TREE_PAGES:
+        raise HTTPException(status_code=400, detail=f"max_pages must be between 1 and {MAX_CATEGORY_TREE_PAGES}")
+
+    pages: dict[str, str] = {}
+    queue = [url]
+    seen: set[str] = set()
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=15,
+        headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"},
+    ) as client:
+        while queue and len(pages) < max_pages:
+            current_url = queue.pop(0)
+            if current_url in seen:
+                continue
+            seen.add(current_url)
+            robot_status = await robots_allowed(current_url)
+            if robot_status is not True:
+                if not pages:
+                    return needs_manual_import("robots.txt disallows access or could not be verified")
+                continue
+            try:
+                response = await client.get(current_url)
+            except httpx.HTTPError:
+                if not pages:
+                    return needs_manual_import("category page could not be accessed")
+                continue
+            if response.status_code in {401, 403, 429}:
+                if not pages:
+                    return needs_manual_import("access denied, login required, or rate limited")
+                continue
+            if response.status_code >= 400:
+                if not pages:
+                    return needs_manual_import(f"category page returned HTTP {response.status_code}")
+                continue
+            content_type = response.headers.get("content-type", "")
+            if "text/html" not in content_type and "application/xhtml" not in content_type:
+                if not pages:
+                    return needs_manual_import("URL is not a public HTML category page")
+                continue
+            final_url = str(response.url)
+            pages[final_url] = response.text
+            for link in extract_category_links_from_html(response.text, final_url):
+                if link not in seen and link not in queue and same_site(url, link):
+                    queue.append(link)
+            if queue and len(pages) < max_pages:
+                await asyncio.sleep(CATEGORY_TREE_DELAY_SECONDS)
+
+    if not pages:
+        return needs_manual_import("could not access any public category pages")
+
+    imported = import_catalog_tree_from_html_pages(pages, next(iter(pages)), brand, max_pages=max_pages)
+    if imported.get("result") == "Needs Manual Import":
+        return imported
+    products = products_for_imported_records(imported.get("records", []))
+    downloaded = await hydrate_official_visual_references(products, "catalog_tree_import")
+    imported["visual_references_created"] = downloaded
+    if downloaded == 0:
+        imported["result"] = "Needs Manual Import"
+        imported["reason"] = "catalog tree imported but no official visual reference could be created"
+    return imported
+
+
+def import_catalog_tree_from_html_pages(
+    pages: dict[str, str],
+    root_url: str,
+    brand: str,
+    max_pages: int = MAX_CATEGORY_TREE_PAGES,
+) -> dict[str, Any]:
+    records: list[dict[str, Any]] = []
+    visited = 0
+    for page_url, html in list(pages.items())[:max_pages]:
+        if not same_site(root_url, page_url):
+            continue
+        extracted = extract_catalog_records_from_html(html, brand, page_url)
+        if extracted["page_type"] == "catalog_page" or looks_like_category_url(page_url):
+            records.extend(extracted["records"])
+        visited += 1
+    records = dedupe_catalog_records(records)
+    if not records:
+        return needs_manual_import("could not extract public product data from category tree")
+    result = import_catalog_records(records, import_type="catalog_tree_import")
+    result["result"] = "Known"
+    result["import_type"] = "catalog_tree_import"
+    result["pages_read"] = visited
+    result["source_url"] = root_url
+    result["records"] = records
+    return result
+
+
+def products_for_imported_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    products = []
+    for record in records:
+        product = find_official_product(str(record.get("brand", "")), str(record.get("product_name", "")))
+        if product:
+            merged = dict(record)
+            merged["brand"] = product["brand"]
+            merged["product_name"] = product["product_name"]
+            products.append(merged)
+    return products
+
+
+def dedupe_catalog_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for record in records:
+        key = (
+            normalize(str(record.get("brand", ""))),
+            normalize(str(record.get("product_name", ""))),
+            str(record.get("official_url", "")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(record)
+    return deduped[:MAX_CATEGORY_PRODUCTS]
 
 
 async def robots_allowed(url: str) -> bool | None:
@@ -274,6 +399,21 @@ def extract_catalog_records_from_html(html: str, brand: str, source_url: str) ->
     return {"page_type": "product_page", "records": records}
 
 
+def extract_category_links_from_html(html: str, source_url: str) -> list[str]:
+    parser = ProductHTMLParser()
+    parser.feed(html)
+    links: list[str] = []
+    seen: set[str] = set()
+    for href in parser.category_links:
+        absolute = absolutize_url(href, source_url)
+        if not absolute or not same_site(source_url, absolute) or not looks_like_category_url(absolute):
+            continue
+        if absolute not in seen:
+            seen.add(absolute)
+            links.append(absolute)
+    return links[:MAX_CATEGORY_TREE_PAGES]
+
+
 class ProductHTMLParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -284,6 +424,7 @@ class ProductHTMLParser(HTMLParser):
         self._in_json_ld = False
         self._json_ld_parts: list[str] = []
         self.product_cards: list[dict[str, str]] = []
+        self.category_links: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attrs_dict = {key.lower(): value or "" for key, value in attrs}
@@ -302,6 +443,8 @@ class ProductHTMLParser(HTMLParser):
             label = attrs_dict.get("aria-label") or attrs_dict.get("title") or attrs_dict.get("data-product-name") or ""
             if looks_like_product_url(href):
                 self.product_cards.append({"href": href, "name": label, "image": ""})
+            elif looks_like_category_url(href):
+                self.category_links.append(href)
         if tag.lower() == "img":
             src = attrs_dict.get("src") or attrs_dict.get("data-src") or attrs_dict.get("data-image") or ""
             alt = attrs_dict.get("alt") or attrs_dict.get("title") or ""
@@ -390,6 +533,31 @@ def looks_like_product_url(href: str) -> bool:
     return any(marker in lowered for marker in ("/products/", "/product/", "/p/", "prod"))
 
 
+def looks_like_category_url(href: str) -> bool:
+    lowered = href.lower()
+    path = urllib.parse.urlparse(href).path.lower()
+    if looks_like_product_url(href):
+        return False
+    return any(
+        marker in lowered or marker in path
+        for marker in (
+            "/c/",
+            "/category/",
+            "/categories/",
+            "/collections/",
+            "/shop/",
+            "/women",
+            "/men",
+            "jackets",
+            "hoodies",
+            "pants",
+            "leggings",
+            "shirts",
+            "shoes",
+        )
+    )
+
+
 def looks_like_product_image(src: str) -> bool:
     lowered = src.lower()
     return any(ext in lowered for ext in (".jpg", ".jpeg", ".png", ".webp", "image"))
@@ -399,6 +567,12 @@ def absolutize_url(value: str, source_url: str) -> str:
     if not value:
         return ""
     return urllib.parse.urljoin(source_url, value)
+
+
+def same_site(root_url: str, candidate_url: str) -> bool:
+    root = urllib.parse.urlparse(root_url)
+    candidate = urllib.parse.urlparse(candidate_url)
+    return root.scheme in {"http", "https"} and candidate.scheme in {"http", "https"} and root.netloc == candidate.netloc
 
 
 def product_name_from_url(url: str, brand: str) -> str:

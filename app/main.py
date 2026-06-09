@@ -12,6 +12,7 @@ from .assets import import_zip_file, save_upload_file
 from .catalog import (
     add_official_visual_reference,
     import_catalog_file,
+    import_catalog_tree_url,
     import_catalog_url,
     list_catalog,
     list_official_assets,
@@ -21,6 +22,7 @@ from .catalog import (
 from .config import DATA_DIR, UPLOAD_DIR
 from .database import connect, decode_json, init_db
 from .knowledge import build_knowledge, list_knowledge_cards, search_knowledge
+from .pipelines import pipeline_design
 from .unknown import unknown_response
 from .vision import latest_observations, process_pending_jobs
 
@@ -45,6 +47,18 @@ def admin() -> str:
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok", "phase": 1, "engine": "Fashion Knowledge Engine"}
+
+
+@app.get("/api/pipelines/design")
+def pipelines_design() -> dict:
+    return pipeline_design()
+
+
+@app.get("/api/source-types")
+def source_types() -> dict:
+    with connect() as conn:
+        rows = conn.execute("SELECT * FROM source_type_registry ORDER BY truth_priority DESC, source_type").fetchall()
+    return {"source_types": [dict(row) for row in rows]}
 
 
 @app.post("/api/upload")
@@ -86,6 +100,15 @@ async def import_catalog_from_url(
     expected_page_type: Annotated[str, Form()] = "catalog_page",
 ) -> dict:
     return await import_catalog_url(url, brand, expected_page_type=expected_page_type)
+
+
+@app.post("/api/catalog/import-tree")
+async def import_catalog_tree(
+    url: Annotated[str, Form()],
+    brand: Annotated[str, Form()],
+    max_pages: Annotated[int, Form()] = 8,
+) -> dict:
+    return await import_catalog_tree_url(url, brand, max_pages=max_pages)
 
 
 @app.get("/api/catalog")
@@ -354,6 +377,13 @@ ADMIN_HTML = """
           <button>Import Public URL</button>
         </form>
         <div class="meta" style="margin-top:10px">URL importer reads one public category/product page only, checks robots.txt, and returns Needs Manual Import when access is not clearly allowed.</div>
+        <form id="catalogTreeForm" style="margin-top:12px">
+          <input name="brand" placeholder="Brand, e.g. Lululemon" />
+          <input name="url" placeholder="Official category tree root URL" />
+          <input name="max_pages" value="8" />
+          <button>Import Category Tree</button>
+        </form>
+        <div class="meta" style="margin-top:10px">Category-tree import follows only same-site public category links, respects robots.txt, uses low request volume, and marks records as catalog_tree_import.</div>
         <h2 style="margin-top:22px">Official Visual Reference</h2>
         <form id="visualRefForm">
           <input name="product_id" placeholder="Official product id" />
@@ -465,6 +495,9 @@ ADMIN_HTML = """
     });
     document.querySelector("#catalogUrlForm").addEventListener("submit", e => {
       e.preventDefault(); postForm("/api/catalog/import-url", e.currentTarget);
+    });
+    document.querySelector("#catalogTreeForm").addEventListener("submit", e => {
+      e.preventDefault(); postForm("/api/catalog/import-tree", e.currentTarget);
     });
     document.querySelector("#visualRefForm").addEventListener("submit", e => {
       e.preventDefault(); postForm("/api/catalog/visual-reference", e.currentTarget);

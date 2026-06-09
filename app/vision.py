@@ -8,6 +8,7 @@ from PIL import Image, UnidentifiedImageError
 from .catalog import list_catalog, match_official_product, match_official_product_by_visual_signature
 from .database import connect, decode_json, encode_json, utc_now
 from .openai_vision import analyze_image_with_openai, empty_product_structure
+from .structure import structure_evidence_from_observation
 from .unknown import UNKNOWN
 from .visual import image_signature
 
@@ -42,7 +43,12 @@ def normalize_tokens(text: str) -> str:
     return re.sub(r"[_\-]+", " ", text.lower())
 
 
-def classify_from_evidence(original_name: str, file_uri: str, source_type: str) -> dict[str, Any]:
+def classify_from_evidence(
+    original_name: str,
+    file_uri: str,
+    source_type: str,
+    asset_id: str | None = None,
+) -> dict[str, Any]:
     evidence_text = normalize_tokens(f"{original_name} {file_uri}")
     unknown_fields: list[str] = []
 
@@ -53,6 +59,7 @@ def classify_from_evidence(original_name: str, file_uri: str, source_type: str) 
         "product_structure": empty_product_structure(),
     }
     product_structure = openai_analysis["product_structure"]
+    structure_source = UNKNOWN
     official_product = None
     match_method = UNKNOWN
     match_confidence = 0.0
@@ -68,6 +75,7 @@ def classify_from_evidence(original_name: str, file_uri: str, source_type: str) 
     if should_call_openai:
         openai_analysis = analyze_image_with_openai(file_uri, list_catalog())
         product_structure = openai_analysis.get("product_structure", empty_product_structure())
+        structure_source = "openai_vision_structure"
 
     if not official_product:
         openai_match = openai_analysis.get("product_match", {})
@@ -98,6 +106,13 @@ def classify_from_evidence(original_name: str, file_uri: str, source_type: str) 
         material = UNKNOWN
         unknown_fields.extend(["brand", "product_name", "official_product_match"])
 
+    product_structure_evidence = structure_evidence_from_observation(
+        product_structure,
+        asset_id=asset_id,
+        source=structure_source if structure_source != UNKNOWN else "official_visual_reference",
+        confidence=match_confidence,
+    )
+
     asset_type = UNKNOWN
     for marker, value in ASSET_TYPE_MARKERS.items():
         if marker in evidence_text:
@@ -125,6 +140,7 @@ def classify_from_evidence(original_name: str, file_uri: str, source_type: str) 
         "source_type": source_type,
         "visual_signature": signature,
         "product_structure": product_structure,
+        "structure_evidence": product_structure_evidence,
         "product_match": {
             "method": match_method,
             "confidence": match_confidence,
@@ -189,7 +205,12 @@ def inspect_image(file_uri: str) -> dict[str, Any]:
 
 
 def analyze_asset(asset: dict[str, Any]) -> dict[str, Any]:
-    structured = classify_from_evidence(asset["original_name"], asset["file_uri"], asset["source_type"])
+    structured = classify_from_evidence(
+        asset["original_name"],
+        asset["file_uri"],
+        asset["source_type"],
+        asset_id=asset.get("asset_id") or asset.get("id"),
+    )
     image_info = inspect_image(asset["file_uri"])
     structured["quality_score"] = image_info["quality_score"]
     if image_info["quality_score"] == UNKNOWN and "quality_score" not in structured["unknown_fields"]:
@@ -203,6 +224,7 @@ def analyze_asset(asset: dict[str, Any]) -> dict[str, Any]:
             "note": "Local Phase 1 analyzer only records evidence-backed fields. Unknown is returned instead of guessing.",
             "image": image_info,
             "product_structure": structured.get("product_structure", {}),
+            "structure_evidence": structured.get("structure_evidence", {}),
         },
         "confidence_map": build_confidence_map(structured),
     }
