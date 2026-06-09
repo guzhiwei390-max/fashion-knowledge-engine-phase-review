@@ -155,8 +155,41 @@ Phase 1 must handle real production material packages, including 10,000+ mixed i
 
 Batch upload and zip import must preserve originals, create a batch_id, keep per-file status, and avoid failing an entire batch because one file is corrupted, duplicated, low quality, or unknown.
 
+Zip uploads must be streamed to disk. The API must not read the entire zip into memory in one operation.
+
+Large-batch import endpoints must return small summaries. Asset-level details must be fetched through paginated APIs.
+
+Unsupported files inside zip imports must be recorded in batch progress instead of silently ignored.
+
 Ordinary user uploads default to Reality Truth. A filename containing words such as "official" must not create Official Truth. Official Truth may only enter through Official Catalog or explicit official visual reference import paths.
 
 Local hashes, thumbnails, EXIF, dimensions, and coarse classification are ingestion infrastructure. They can prefilter and organize work, but they must not become final product identity.
 
 Multi-product photos must not be forced into a single product match. They require region/candidate structures and review when uncertain.
+
+## Pagination Boundary
+
+Large operational endpoints must be paginated and filterable.
+
+The following endpoints must not return the entire database by default:
+
+- `GET /api/assets`
+- `GET /api/review-queue`
+- `GET /api/observations`
+- `GET /api/knowledge-cards`
+
+## DNA Truth Layer Separation
+
+Product knowledge must remain split by truth layer:
+
+- OfficialProductDNA: official catalog and official visual reference evidence
+- RealityProductDNA: user uploads, employee photos, buyer photos, real wearing photos, and real details
+- CommunityDNA: future public social/community evidence
+
+OfficialProductDNA can be supplemented only by official evidence. RealityProductDNA and CommunityDNA must not overwrite OfficialProductDNA.
+
+## Review Learning Loop
+
+Resolving a Review Queue item must create auditable learning evidence.
+
+At minimum, a resolution should update the target label or observation when provided, record a human correction, store the correction reason, mark that rebuild is required, and keep the source as Reality Truth unless the correction came through an official-only import path.

@@ -454,15 +454,42 @@ def batch_vision_remaining(conn, batch_id: str) -> int:
     return max(0, min(by_count, by_cost))
 
 
-def latest_observations() -> list[dict[str, Any]]:
+def latest_observations(
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    batch_id: str | None = None,
+    product_name: str | None = None,
+) -> dict[str, Any]:
+    clauses = []
+    params: list[Any] = []
+    if batch_id:
+        clauses.append("assets.upload_batch_id = ?")
+        params.append(batch_id)
+    if product_name:
+        clauses.append("vision_observations.structured_output LIKE ?")
+        params.append(f'%"product_name": "{product_name}"%')
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     with connect() as conn:
+        total = conn.execute(
+            f"""
+            SELECT COUNT(*) AS count
+            FROM vision_observations
+            JOIN assets ON assets.id = vision_observations.asset_id
+            {where}
+            """,
+            params,
+        ).fetchone()["count"]
         rows = conn.execute(
-            """
+            f"""
             SELECT vision_observations.*, assets.original_name, assets.file_uri
             FROM vision_observations
             JOIN assets ON assets.id = vision_observations.asset_id
+            {where}
             ORDER BY vision_observations.created_at DESC
-            """
+            LIMIT ? OFFSET ?
+            """,
+            (*params, limit, offset),
         ).fetchall()
     observations = []
     for row in rows:
@@ -471,4 +498,4 @@ def latest_observations() -> list[dict[str, Any]]:
         item["unknown_fields"] = decode_json(item["unknown_fields"], [])
         item["confidence_map"] = decode_json(item["confidence_map"], {})
         observations.append(item)
-    return observations
+    return {"observations": observations, "total": total, "limit": limit, "offset": offset}

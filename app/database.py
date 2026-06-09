@@ -125,6 +125,8 @@ def init_db() -> None:
                 unknown INTEGER NOT NULL DEFAULT 0,
                 review_needed INTEGER NOT NULL DEFAULT 0,
                 failed INTEGER NOT NULL DEFAULT 0,
+                unsupported_count INTEGER NOT NULL DEFAULT 0,
+                unsupported_files_json TEXT NOT NULL DEFAULT '[]',
                 vision_calls_used INTEGER NOT NULL DEFAULT 0,
                 openai_vision_calls_used INTEGER NOT NULL DEFAULT 0,
                 max_vision_calls_per_batch INTEGER NOT NULL DEFAULT 100,
@@ -593,6 +595,8 @@ def init_db() -> None:
         ensure_column(conn, "asset_batches", "cost_limit", "REAL NOT NULL DEFAULT 0.30")
         ensure_column(conn, "asset_batches", "require_manual_confirm_before_large_vision_run", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "asset_batches", "vision_status", "TEXT NOT NULL DEFAULT 'within_budget'")
+        ensure_column(conn, "asset_batches", "unsupported_count", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "asset_batches", "unsupported_files_json", "TEXT NOT NULL DEFAULT '[]'")
         ensure_reserved_extension_columns(conn)
         seed_source_type_registry(conn)
 

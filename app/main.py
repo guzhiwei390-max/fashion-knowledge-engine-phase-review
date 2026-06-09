@@ -98,13 +98,22 @@ async def import_zip(file: Annotated[UploadFile, File(...)]) -> dict:
     batch_id = str(uuid.uuid4())
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(delete=False, suffix=".zip", dir=DATA_DIR) as temp:
-        temp.write(await file.read())
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            temp.write(chunk)
         temp_path = Path(temp.name)
     try:
-        imported = import_zip_file(temp_path, batch_id)
+        summary = import_zip_file(temp_path, batch_id)
     finally:
         temp_path.unlink(missing_ok=True)
-    return {"batch_id": batch_id, "assets": imported}
+    return {
+        "batch_id": batch_id,
+        "total_received": summary["total_received"],
+        "unsupported_count": summary["unsupported_count"],
+        "status": summary["status"],
+    }
 
 
 @app.post("/api/catalog/import")
@@ -171,17 +180,45 @@ async def upload_official_visual_reference(
 
 
 @app.post("/api/jobs/process")
-def process_jobs(limit: int = 5000) -> dict:
+def process_jobs(limit: int = 100) -> dict:
     job_result = process_pending_jobs(limit=limit)
     knowledge_result = build_knowledge()
     return {"jobs": job_result, "knowledge": knowledge_result}
 
 
+def pagination(limit: int = 100, offset: int = 0) -> tuple[int, int]:
+    return max(1, min(int(limit), 500)), max(0, int(offset))
+
+
 @app.get("/api/assets")
-def list_assets() -> dict:
+def list_assets(
+    limit: int = 100,
+    offset: int = 0,
+    batch_id: str | None = None,
+    asset_type: str | None = None,
+    quality_status: str | None = None,
+    duplicate_status: str | None = None,
+) -> dict:
+    limit, offset = pagination(limit, offset)
+    clauses = []
+    params: list[object] = []
+    for column, value in (
+        ("upload_batch_id", batch_id),
+        ("asset_type", asset_type),
+        ("quality_status", quality_status),
+        ("duplicate_status", duplicate_status),
+    ):
+        if value:
+            clauses.append(f"{column} = ?")
+            params.append(value)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     with connect() as conn:
-        rows = conn.execute("SELECT * FROM assets ORDER BY created_at DESC").fetchall()
-    return {"assets": [dict(row) for row in rows]}
+        total = conn.execute(f"SELECT COUNT(*) AS count FROM assets {where}", params).fetchone()["count"]
+        rows = conn.execute(
+            f"SELECT * FROM assets {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (*params, limit, offset),
+        ).fetchall()
+    return {"assets": [dict(row) for row in rows], "total": total, "limit": limit, "offset": offset}
 
 
 @app.get("/api/jobs")
@@ -300,14 +337,22 @@ async def update_batch_vision_budget(batch_id: str, payload: dict) -> dict:
 
 
 @app.get("/api/observations")
-def observations() -> dict:
-    return {"observations": latest_observations()}
+def observations(limit: int = 100, offset: int = 0, batch_id: str | None = None, product_name: str | None = None) -> dict:
+    limit, offset = pagination(limit, offset)
+    return latest_observations(limit=limit, offset=offset, batch_id=batch_id, product_name=product_name)
 
 
 @app.get("/api/review-queue")
-def review_queue(status: str | None = None) -> dict:
+def review_queue(
+    status: str | None = None,
+    reason: str | None = None,
+    item_type: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict:
+    limit, offset = pagination(limit, offset)
     with connect() as conn:
-        return {"review_queue": list_review_items(conn, status=status)}
+        return list_review_items(conn, status=status, reason=reason, item_type=item_type, limit=limit, offset=offset)
 
 
 @app.post("/api/review-queue/{review_id}/resolve")
@@ -324,8 +369,9 @@ async def resolve_review_queue_item(review_id: str, resolution: dict) -> dict:
 
 
 @app.get("/api/knowledge-cards")
-def knowledge_cards() -> dict:
-    return {"knowledge_cards": list_knowledge_cards()}
+def knowledge_cards(limit: int = 100, offset: int = 0, brand: str | None = None, product_name: str | None = None) -> dict:
+    limit, offset = pagination(limit, offset)
+    return list_knowledge_cards(limit=limit, offset=offset, brand=brand, product_name=product_name)
 
 
 @app.get("/api/search")

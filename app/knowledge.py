@@ -215,6 +215,9 @@ def build_dna_suite(
     product_unknowns = set(product_dna.get("unknown_fields", []))
     return {
         "ProductDNA": product_dna,
+        "OfficialProductDNA": build_official_product_dna(brand, product_name, product_dna),
+        "RealityProductDNA": build_reality_product_dna(brand, product_name, observations, product_dna),
+        "CommunityDNA": build_community_dna(brand, product_name),
         "GarmentValidationRules": build_garment_validation_rules(product_dna, evidence_asset_ids),
         "MaterialDNA": {
             "brand": brand,
@@ -233,6 +236,68 @@ def build_dna_suite(
         "SceneDNA": empty_context_dna(brand, product_name, "SceneDNA", evidence_asset_ids),
         "CustomerRealityDNA": empty_context_dna(brand, product_name, "CustomerRealityDNA", evidence_asset_ids),
         "TrendDNA": empty_context_dna(brand, product_name, "TrendDNA", evidence_asset_ids),
+    }
+
+
+def build_official_product_dna(brand: str, product_name: str, product_dna: dict[str, Any]) -> dict[str, Any]:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM official_products WHERE brand = ? AND product_name = ?",
+            (brand, product_name),
+        ).fetchone()
+    if not row:
+        return {
+            "brand": brand,
+            "product_name": product_name,
+            "truth_layer": "official_truth",
+            "result": UNKNOWN,
+            "unknown_fields": ["official_product"],
+        }
+    return {
+        "brand": row["brand"],
+        "product_name": row["product_name"],
+        "product_family": row["product_family"],
+        "variant": row["variant"],
+        "category": row["category"],
+        "material": row["material"],
+        "colors": decode_json(row["colors"], []),
+        "aliases": decode_json(row["aliases"], []),
+        "truth_layer": "official_truth",
+        "truth_locked": bool(row["truth_locked"]),
+        "official_fields": decode_json(row["official_fields_json"], {}),
+        "structure_reference": product_dna.get("structure_evidence", {}),
+        "unknown_fields": [],
+    }
+
+
+def build_reality_product_dna(
+    brand: str,
+    product_name: str,
+    observations: list[dict[str, Any]],
+    product_dna: dict[str, Any],
+) -> dict[str, Any]:
+    evidence_asset_ids = sorted({item["asset_id"] for item in observations})
+    return {
+        "brand": brand,
+        "product_name": product_name,
+        "truth_layer": "reality_truth",
+        "source": "internal_upload_pipeline",
+        "material_behavior": product_dna.get("material_behavior", empty_structure_evidence()["material_behavior"]),
+        "product_structure": product_dna.get("product_structure", {}),
+        "structure_evidence": product_dna.get("structure_evidence", {}),
+        "evidence_asset_ids": evidence_asset_ids,
+        "unknown_fields": product_dna.get("unknown_fields", []),
+    }
+
+
+def build_community_dna(brand: str, product_name: str) -> dict[str, Any]:
+    return {
+        "brand": brand,
+        "product_name": product_name,
+        "truth_layer": "community_truth",
+        "status": "Reserved",
+        "source": "external_knowledge_pipeline",
+        "unknown_fields": ["community_evidence_not_ingested_in_phase1"],
     }
 
 
@@ -392,9 +457,28 @@ def log_query(conn, query: dict[str, Any], result: dict[str, Any], returned_unkn
     )
 
 
-def list_knowledge_cards() -> list[dict[str, Any]]:
+def list_knowledge_cards(
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    brand: str | None = None,
+    product_name: str | None = None,
+) -> dict[str, Any]:
+    clauses = []
+    params: list[Any] = []
+    if brand:
+        clauses.append("brand = ?")
+        params.append(brand)
+    if product_name:
+        clauses.append("product_name = ?")
+        params.append(product_name)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     with connect() as conn:
-        rows = conn.execute("SELECT * FROM knowledge_cards ORDER BY updated_at DESC").fetchall()
+        total = conn.execute(f"SELECT COUNT(*) AS count FROM knowledge_cards {where}", params).fetchone()["count"]
+        rows = conn.execute(
+            f"SELECT * FROM knowledge_cards {where} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+            (*params, limit, offset),
+        ).fetchall()
     cards = []
     for row in rows:
         item = dict(row)
@@ -402,4 +486,4 @@ def list_knowledge_cards() -> list[dict[str, Any]]:
         item["evidence_asset_ids"] = decode_json(item["evidence_asset_ids"], [])
         item["unknown_fields"] = decode_json(item["unknown_fields"], [])
         cards.append(item)
-    return cards
+    return {"knowledge_cards": cards, "total": total, "limit": limit, "offset": offset}

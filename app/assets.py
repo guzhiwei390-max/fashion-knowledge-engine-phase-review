@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from fastapi import HTTPException, UploadFile
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageFilter, ImageStat, UnidentifiedImageError
 
 from .classification import coarse_classify_asset
 from .config import ALLOWED_IMAGE_EXTENSIONS, MAX_UPLOAD_BYTES, UPLOAD_DIR, max_vision_calls_per_batch, vision_cost_limit, vision_require_confirm_above
@@ -118,16 +118,14 @@ def create_asset_record(
             record_duplicate_attempt(conn, batch_id)
             return dict(duplicate)
 
-        near_duplicate = find_near_duplicate(conn, visual_signature)
+        near_duplicate = find_near_duplicate(conn, visual_signature, batch_id=batch_id)
         duplicate_of_asset_id = near_duplicate["id"] if near_duplicate else None
         duplicate_status = "near_duplicate" if near_duplicate else "unique"
-        classification = coarse_classify_asset(
+        classification = classify_with_content(
             original_name=original_name,
             source_type=source_type,
-            width=metadata.get("width"),
-            height=metadata.get("height"),
+            metadata=metadata,
             duplicate_status=duplicate_status,
-            corrupted=metadata["ingestion_status"] == "corrupted",
         )
 
         shutil.move(str(file_path), final_path)
@@ -136,6 +134,7 @@ def create_asset_record(
             "file_hash": asset_hash,
             "perceptual_hash": visual_signature.get("ahash", "Unknown"),
             "coarse_classification_signals": classification["signals"],
+            "content_signals": metadata.get("content_signals", {}),
             "original_saved": True,
         }
         conn.execute(
@@ -263,6 +262,7 @@ def inspect_upload_image(path: Path) -> dict[str, Any]:
                 "width": width,
                 "height": height,
                 "exif": exif,
+                "content_signals": analyze_image_content(image),
             }
     except (UnidentifiedImageError, OSError, ValueError):
         return {
@@ -270,7 +270,97 @@ def inspect_upload_image(path: Path) -> dict[str, Any]:
             "width": None,
             "height": None,
             "exif": {},
+            "content_signals": {},
         }
+
+
+def analyze_image_content(image: Image.Image) -> dict[str, Any]:
+    sample = image.convert("RGB")
+    sample.thumbnail((160, 160))
+    width, height = sample.size
+    pixels = list(sample.getdata())
+    total = max(1, len(pixels))
+    white_pixels = sum(1 for r, g, b in pixels if r > 235 and g > 235 and b > 235)
+    dark_pixels = sum(1 for r, g, b in pixels if r < 80 and g < 80 and b < 80)
+    saturated_pixels = sum(1 for r, g, b in pixels if max(r, g, b) - min(r, g, b) > 70)
+    edge_image = sample.convert("L").filter(ImageFilter.FIND_EDGES)
+    edge_mean = ImageStat.Stat(edge_image).mean[0]
+    blur_score = ImageStat.Stat(sample.convert("L").filter(ImageFilter.FIND_EDGES)).var[0]
+    object_count = estimate_object_count(sample)
+    white_background = white_pixels / total > 0.72
+    detail_like = edge_mean > 28 and max(width, height) / max(1, min(width, height)) < 1.8
+    scene_like = not white_background and saturated_pixels / total > 0.22 and edge_mean > 18
+    human_like = estimate_human_like(sample)
+    return {
+        "white_background": white_background,
+        "object_count": object_count,
+        "multi_subject": object_count >= 3,
+        "detail_like": detail_like,
+        "scene_like": scene_like,
+        "human_like": human_like,
+        "dark_ratio": round(dark_pixels / total, 4),
+        "white_ratio": round(white_pixels / total, 4),
+        "edge_mean": round(edge_mean, 4),
+        "blur_score": round(blur_score, 4),
+    }
+
+
+def estimate_object_count(image: Image.Image) -> int:
+    width, height = image.size
+    pixels = image.load()
+    visited: set[tuple[int, int]] = set()
+    components = 0
+    min_component = max(20, int(width * height * 0.015))
+    for y in range(0, height, 2):
+        for x in range(0, width, 2):
+            if (x, y) in visited:
+                continue
+            r, g, b = pixels[x, y]
+            if not (r < 120 and g < 120 and b < 120):
+                continue
+            stack = [(x, y)]
+            visited.add((x, y))
+            size = 0
+            while stack:
+                cx, cy = stack.pop()
+                size += 1
+                for nx, ny in ((cx + 2, cy), (cx - 2, cy), (cx, cy + 2), (cx, cy - 2)):
+                    if nx < 0 or ny < 0 or nx >= width or ny >= height or (nx, ny) in visited:
+                        continue
+                    nr, ng, nb = pixels[nx, ny]
+                    if nr < 120 and ng < 120 and nb < 120:
+                        visited.add((nx, ny))
+                        stack.append((nx, ny))
+            if size >= min_component:
+                components += 1
+    return components
+
+
+def estimate_human_like(image: Image.Image) -> bool:
+    width, height = image.size
+    if height <= width * 1.15:
+        return False
+    pixels = list(image.getdata())
+    skin_like = sum(1 for r, g, b in pixels if r > 120 and g > 70 and b > 45 and r > g and g > b)
+    return skin_like / max(1, len(pixels)) > 0.025
+
+
+def classify_with_content(
+    *,
+    original_name: str,
+    source_type: str,
+    metadata: dict[str, Any],
+    duplicate_status: str,
+) -> dict[str, Any]:
+    return coarse_classify_asset(
+        original_name=original_name,
+        source_type=source_type,
+        width=metadata.get("width"),
+        height=metadata.get("height"),
+        duplicate_status=duplicate_status,
+        corrupted=metadata["ingestion_status"] == "corrupted",
+        content_signals=metadata.get("content_signals", {}),
+    )
 
 
 def create_thumbnail(path: Path, batch_id: str, asset_id: str) -> str | None:
@@ -286,19 +376,34 @@ def create_thumbnail(path: Path, batch_id: str, asset_id: str) -> str | None:
         return None
 
 
-def find_near_duplicate(conn, signature: dict) -> dict | None:
+def find_near_duplicate(conn, signature: dict, batch_id: str | None = None) -> dict | None:
     if signature.get("result") == "Unknown":
         return None
-    rows = conn.execute(
-        """
-        SELECT id, visual_signature
-        FROM assets
-        WHERE visual_signature IS NOT NULL
-          AND visual_signature != '{}'
-        ORDER BY created_at DESC
-        LIMIT 200
-        """
-    ).fetchall()
+    if batch_id:
+        rows = conn.execute(
+            """
+            SELECT id, visual_signature
+            FROM assets
+            WHERE upload_batch_id = ?
+              AND visual_signature IS NOT NULL
+              AND visual_signature != '{}'
+            ORDER BY created_at ASC
+            """,
+            (batch_id,),
+        ).fetchall()
+    else:
+        rows = []
+    if not rows:
+        rows = conn.execute(
+            """
+            SELECT id, visual_signature
+            FROM assets
+            WHERE visual_signature IS NOT NULL
+              AND visual_signature != '{}'
+            ORDER BY created_at DESC
+            LIMIT 2000
+            """
+        ).fetchall()
     best: dict | None = None
     for row in rows:
         score = signature_similarity(signature, row["visual_signature"])
@@ -326,6 +431,25 @@ def ensure_batch_record(conn, batch_id: str) -> None:
             now,
             now,
         ),
+    )
+
+
+def record_unsupported_files(conn, batch_id: str, unsupported_files: list[str]) -> None:
+    if not unsupported_files:
+        return
+    ensure_batch_record(conn, batch_id)
+    row = conn.execute("SELECT unsupported_files_json FROM asset_batches WHERE id = ?", (batch_id,)).fetchone()
+    current = decode_json(row["unsupported_files_json"], []) if row else []
+    merged = list(dict.fromkeys([*current, *unsupported_files]))
+    conn.execute(
+        """
+        UPDATE asset_batches
+        SET unsupported_count = ?,
+            unsupported_files_json = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (len(merged), encode_json(merged), utc_now(), batch_id),
     )
 
 
@@ -471,6 +595,7 @@ def batch_progress(batch_id: str | None = None) -> list[dict[str, Any]]:
     for row in rows:
         item = dict(row)
         item["metadata_json"] = decode_json(item.get("metadata_json"), {})
+        item["unsupported_files_json"] = decode_json(item.get("unsupported_files_json"), [])
         results.append(item)
     return results
 
@@ -491,20 +616,29 @@ async def save_upload_file(file: UploadFile, batch_id: str) -> dict:
     )
 
 
-def import_zip_file(zip_path: Path, batch_id: str) -> list[dict]:
-    imported: list[dict] = []
+def import_zip_file(zip_path: Path, batch_id: str) -> dict[str, Any]:
+    imported_count = 0
+    unsupported_files: list[str] = []
     temp_dir = UPLOAD_DIR / "tmp" / f"zip-{uuid.uuid4()}"
     temp_dir.mkdir(parents=True, exist_ok=True)
     try:
         with zipfile.ZipFile(zip_path) as archive:
             for member in archive.infolist():
                 member_name = member.filename
-                if member.is_dir() or not is_allowed_image(member_name):
-                    continue
                 normalized = Path(member_name)
+                if member.is_dir():
+                    continue
                 if normalized.is_absolute() or ".." in normalized.parts:
+                    unsupported_files.append(member_name)
+                    continue
+                if normalized.name.startswith(".") or "__MACOSX" in normalized.parts or not is_allowed_image(member_name):
+                    unsupported_files.append(member_name)
+                    continue
+                if member.file_size > MAX_UPLOAD_BYTES:
+                    unsupported_files.append(member_name)
                     continue
                 destination = temp_dir / normalized.name
+                exceeded_size = False
                 with archive.open(member) as source, destination.open("wb") as output:
                     size = 0
                     while True:
@@ -514,9 +648,11 @@ def import_zip_file(zip_path: Path, batch_id: str) -> list[dict]:
                         size += len(chunk)
                         if size > MAX_UPLOAD_BYTES:
                             destination.unlink(missing_ok=True)
-                            raise HTTPException(status_code=413, detail=f"File is too large: {member_name}")
+                            unsupported_files.append(member_name)
+                            exceeded_size = True
+                            break
                         output.write(chunk)
-                imported.append(
+                if destination.exists() and not exceeded_size:
                     create_asset_record(
                         file_path=destination,
                         original_name=member_name,
@@ -524,7 +660,17 @@ def import_zip_file(zip_path: Path, batch_id: str) -> list[dict]:
                         size_bytes=member.file_size,
                         batch_id=batch_id,
                     )
-                )
+                    imported_count += 1
+        with connect() as conn:
+            ensure_batch_record(conn, batch_id)
+            record_unsupported_files(conn, batch_id, unsupported_files)
+            refresh_batch_progress(conn, batch_id)
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
-    return imported
+    return {
+        "batch_id": batch_id,
+        "total_received": imported_count,
+        "unsupported_count": len(unsupported_files),
+        "unsupported_files": unsupported_files[:100],
+        "status": "queued" if imported_count else "needs_manual_review",
+    }

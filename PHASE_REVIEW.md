@@ -1,121 +1,130 @@
 # Current Version
 
-当前版本号：Phase 1 Vision Provider Adapter v0.8
+Current version: Phase 1 Production Batch Hardening v0.9
 
-当前 Commit Hash：pending until commit; see final response for exact hash
+Current Commit Hash: pending until commit; see final response for exact hash
 
-当前 Branch：master
+Current Branch: master
 
 ---
 
 # Added
 
-本次新增功能：
-- Vision Provider Adapter
-- 统一 Vision JSON schema
-- Vision Router / Vision Gate
-- Vision batch budget control
-- OpenAI / MiMo / Qwen-VL / Gemini / Local provider 配置入口
-- Local Vision fallback
-- Vision A/B 测试准备
-- 通用 vision_calls_used 批次统计字段
-- 批次 Vision budget 更新接口
-- Vision 路由测试、Provider schema 测试、预算暂停测试
+This iteration added:
+- Streaming zip upload to avoid loading the whole archive into memory
+- Zip import summary response instead of returning all imported assets
+- Unsupported file tracking for zip imports
+- Pagination and filters for assets, review queue, observations, and knowledge cards
+- Content-based coarse classification signals
+- Multi-product detection based on image content signals
+- Same-batch-first near duplicate search with larger fallback window
+- Review Queue learning actions on resolve
+- Human correction records from review resolution
+- OfficialProductDNA, RealityProductDNA, and CommunityDNA separation in the DNA suite
+- Safer default job process batch size
 
 ---
 
 # Database Changes
 
-新增表：
-- 无新增业务表
+Added tables:
+- None
 
-修改表：
-- asset_batches：新增 vision_calls_used
-- asset_batches：新增 max_vision_calls_per_batch
-- asset_batches：新增 cost_limit
-- asset_batches：新增 require_manual_confirm_before_large_vision_run
-- asset_batches：新增 vision_status
+Modified tables:
+- asset_batches: added unsupported_count
+- asset_batches: added unsupported_files_json
 
-保留兼容字段：
-- asset_batches.openai_vision_calls_used 保留为旧版本兼容字段，但新逻辑优先使用 vision_calls_used
+Existing tables now used more strictly:
+- human_corrections records review-based corrections
+- assets.ingestion_metadata stores content signals and human review notes
+- dna_records now includes OfficialProductDNA, RealityProductDNA, and CommunityDNA records
 
 ---
 
 # API Changes
 
-新增接口：
-- POST /api/batches/{batch_id}/vision-budget
+Added interfaces:
+- None
 
-修改接口：
-- POST /api/jobs/process：Vision 调用前必须经过 Vision Router、预算判断、候选收窄、Confidence Engine、Evidence Engine、Review Queue
-- GET /api/batches：返回通用 vision_calls_used、vision_status、max_vision_calls_per_batch、estimated_cost
-- GET /：管理后台批次进度显示通用 Vision calls 和 Vision budget 状态
-- GET /api/pipelines/design：增加 vision_provider_adapter 架构信息
+Modified interfaces:
+- POST /api/import/zip now writes the uploaded zip in chunks and returns only batch_id, total_received, unsupported_count, and status
+- POST /api/jobs/process default limit changed from 5000 to 100
+- GET /api/assets now supports limit, offset, batch_id, asset_type, quality_status, duplicate_status
+- GET /api/review-queue now supports limit, offset, status, reason, item_type
+- GET /api/observations now supports limit, offset, batch_id, product_name
+- GET /api/knowledge-cards now supports limit, offset, brand, product_name
+- POST /api/review-queue/{review_id}/resolve now updates asset labels or observation fields, records human_corrections, and returns learning_actions
 
 ---
 
 # Architecture Changes
 
-本次架构调整：
-- Vision 不再绑定 OpenAI，新增 provider adapter：openai、mimo、qwen_vl、gemini、local
-- Vision Provider 必须返回统一 schema：product_match、product_structure、multi_product、quality
-- Vision 不是第一层粗筛，第一层仍然是 Local Ingestion、Deduplication、Coarse Classification
-- Vision 只能验证 Official Catalog 候选，不能自由创造品牌、产品、配饰或分类
-- Vision 输出不能直接写入最终结果，必须经过 Confidence Engine、Evidence Engine、Review Queue
-- Vision Router 会跳过 duplicate、near duplicate、corrupted、low_quality、scene-only、高置信度本地匹配等不值得调用 Vision 的图片
-- 批次级预算控制支持 max_vision_calls_per_batch、cost_limit、require_manual_confirm_before_large_vision_run
-- 超过预算时批次进入 paused_budget，不继续调用 Vision
-- Product Structure DNA 的证据来源改为通用 vision_structure，保留 openai_vision_structure 兼容别名
-- 普通上传仍然默认 Reality Truth，文件名不能创建 Official Truth
+This iteration changed:
+- Zip ingestion is now streaming at the API boundary.
+- Zip import no longer returns large asset arrays that would break with 1,000 or 10,000 images.
+- Unsupported files are auditable instead of silently ignored.
+- Coarse classification no longer depends mainly on filenames.
+- Local image content signals now contribute to white-background, multi-subject, detail-like, scene-like, human-like, and low-quality classification.
+- Multi-product photos can be detected without filename markers and routed to review.
+- Review Queue is now part of the learning loop instead of only a status list.
+- Product DNA is now explicitly layered into OfficialProductDNA, RealityProductDNA, and CommunityDNA.
+- Official Truth remains locked; ordinary uploads remain Reality Truth.
+- Vision remains a second-layer verification path and is still behind Vision Router and budget control.
 
 ---
 
 # What Works
 
-目前已经可以工作的功能：
-- 通过 VISION_PROVIDER 切换 openai / mimo / qwen_vl / gemini / local
-- 未配置远程 provider 时，local provider 返回 Unknown，不猜测
-- MiMo 类响应可以被标准化成统一 schema
-- Vision 调用前会先做本地 ingestion、去重、粗分类、候选收窄和预算判断
-- 低价值输入不会进入 Vision：duplicate、near duplicate、low_quality、scene_photo
-- 批次 Vision 调用达到上限后暂停，后续图片不继续调用 Vision
-- Vision 结果会保留 confidence、why、provider、vision_route
-- 低置信度仍然进入 Human Review Queue
-- Evidence Engine 仍然返回 matched_because、matched_official_assets、evidence_asset_ids、uncertain_fields
-- 39 个自动化测试通过
+Currently working:
+- Large zip uploads are written to disk in chunks.
+- Zip import response remains small even for large batches.
+- Unsupported zip entries are counted and stored.
+- Asset lists are paginated and filterable.
+- Review Queue is paginated and filterable.
+- Observations and knowledge cards are paginated and filterable.
+- Local image content signals identify basic white-background and multi-subject cases.
+- Multi-product image candidates enter the multi_product_photo path without relying on filenames.
+- Review resolution can update asset labels, write Reality Truth correction metadata, and record human_corrections.
+- Knowledge build outputs ProductDNA plus OfficialProductDNA, RealityProductDNA, and CommunityDNA.
+- process_jobs defaults to smaller chunks for safer large-batch processing.
+- Automated tests pass: 43 passed.
 
 ---
 
 # Known Limitations
 
-目前已知问题：
-- MiMo、Qwen-VL、Gemini 当前通过通用 HTTP endpoint 适配，具体厂商 payload 可能还需要按实际 API 文档细化
-- Vision 成本估算仍是 Phase 1 粗估，每次调用按固定单价估算
-- Vision A/B 测试框架已经可接入，但还没有独立的 A/B 报告页面
-- 本地 visual matching 仍是轻量预筛选，不是生产级 embedding 检索
-- Multi-product 图片仍然只有 region/candidate 结构预留和 Review Queue 路由，还没有稳定自动切图
-- Human Review UI 仍是基础版本，适合验证工作流，但还不是高效率生产审核台
+Known limitations:
+- Content-based coarse classification is still lightweight heuristic analysis, not a production CV detector.
+- Multi-product handling marks candidates and creates review structures but does not yet crop stable product regions automatically.
+- Near duplicate grouping is improved for same-batch stability but still not a full embedding-based clustering system.
+- Review resolution can update labels and observations, but the review UI is still basic.
+- Zip unsupported_files_json stores a capped preview in import summary; full audit remains in the batch row.
+- True background worker infrastructure is still SQLite-backed Phase 1 queue logic, not a separate worker service.
+- Vision provider A/B reporting is not implemented yet.
 
 ---
 
 # Next Recommended Step
 
-我建议下一步开发：
-- 加一个 Vision A/B evaluation runner，用 50-100 张图片对 OpenAI 和 MiMo 比较准确率、结构识别、多商品识别、JSON 稳定性、速度和成本
-- 增强 Official Product Visual Reference 的多图综合评分
-- 增强 Human Review 修正入口，让人工修正能更清晰地回写 Reality Truth 和匹配提示
-- 对 1,000 张测试 zip 做真实批量导入压测，观察 paused_budget、review_needed、unknown、duplicate 的比例
+Recommended next step:
+- Run a 1,000-image mixed zip pressure test and inspect batch counters: total, ingested, unsupported, duplicate, near duplicate, low_quality, multi_product_photo, unknown, review_needed, failed.
+- Improve image content classification with a lightweight local detector or embedding prefilter.
+- Add a stronger manual review UI for high-volume corrections.
+- Add product-region crop candidate generation for multi-product photos.
+- Add an A/B evaluation runner for OpenAI vs MiMo on 50-100 selected review-needed images.
 
 ---
 
 # Review Focus
 
-请重点审查：
-- Vision Provider Adapter 是否真的没有把 OpenAI 写死为唯一模型
-- Vision Router 是否严格保证 Vision 不是第一层入口
-- Vision 是否只能验证候选，不能创造新产品
-- 统一 JSON schema 是否足够支持 OpenAI / MiMo / Qwen-VL / Gemini / Local
-- Vision 输出是否仍然经过 Confidence Engine、Evidence Engine、Review Queue
-- 批次预算控制是否能防止 1,000 或 10,000 张图片默认全部发送给 Vision
-- Product Structure DNA 是否保持品牌无关
-- Official Truth Lock、Unknown First、Phase 1 禁止生成是否没有被破坏
+Please review:
+- Whether zip import is safe for large files and avoids one-shot memory reads.
+- Whether large batch APIs avoid returning unbounded arrays.
+- Whether pagination is present on assets, review queue, observations, and knowledge cards.
+- Whether unsupported zip files are recorded instead of silently ignored.
+- Whether filename-based classification has been reduced to an auxiliary signal.
+- Whether multi-product photos are no longer forced into one product identity.
+- Whether Review Queue resolution actually writes learning evidence.
+- Whether OfficialProductDNA, RealityProductDNA, and CommunityDNA stay separate.
+- Whether ordinary uploads remain Reality Truth and cannot create Official Truth.
+- Whether Vision remains gated, budgeted, and candidate-verification-only.

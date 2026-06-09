@@ -1,7 +1,10 @@
 from pathlib import Path
+import io
+import zipfile
 
 import pytest
 from PIL import Image
+from fastapi.testclient import TestClient
 
 from app import assets, catalog, database
 from app.catalog import (
@@ -29,6 +32,7 @@ from app.openai_vision import parse_openai_response
 from app.vision_provider import analyze_image_with_provider, normalize_vision_result
 from app.vision_router import vision_route_decision
 from app.main import reserved_extensions, source_types as source_types_endpoint, pipelines_design
+from app.main import app
 
 
 @pytest.fixture()
@@ -183,7 +187,7 @@ def test_user_upload_filename_cannot_create_official_truth(isolated_db, tmp_path
 
     assert asset["source_type"] == "uploaded"
     assert asset["truth_layer"] == TRUTH_REALITY
-    assert asset["asset_type"] == "reality_product_photo"
+    assert asset["asset_type"] != "official_product_image"
 
 
 def test_corrupted_image_is_stored_without_blocking_batch(isolated_db, tmp_path):
@@ -893,6 +897,116 @@ def test_vision_budget_pauses_batch_before_excess_calls(isolated_db, tmp_path, m
     assert paused_job is not None
 
 
+def test_zip_import_streams_and_returns_summary(isolated_db, tmp_path):
+    import_catalog_records([{"brand": "Alo", "product_name": "Airbrush Legging", "category": "Leggings"}])
+    archive_bytes = io.BytesIO()
+    with zipfile.ZipFile(archive_bytes, "w") as archive:
+        image_buffer = io.BytesIO()
+        Image.new("RGB", (512, 512), (245, 245, 245)).save(image_buffer, "PNG")
+        archive.writestr("IMG_1001.png", image_buffer.getvalue())
+        archive.writestr("notes.txt", "not an image")
+        archive.writestr("__MACOSX/._hidden", "hidden")
+    archive_bytes.seek(0)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/import/zip",
+        files={"file": ("mixed.zip", archive_bytes.getvalue(), "application/zip")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert set(payload) == {"batch_id", "total_received", "status", "unsupported_count"}
+    assert payload["total_received"] == 1
+    assert payload["unsupported_count"] == 2
+    with database.connect() as conn:
+        batch = conn.execute("SELECT * FROM asset_batches WHERE id = ?", (payload["batch_id"],)).fetchone()
+    assert batch["unsupported_count"] == 2
+
+
+def test_paginated_asset_and_review_endpoints_filter_results(isolated_db, tmp_path):
+    import_catalog_records([{"brand": "On", "product_name": "Cloudmonster", "category": "Shoes"}])
+    for index in range(3):
+        image_path = tmp_path / f"IMG_page_{index}.png"
+        make_solid_image(image_path, (index * 20, index * 20, index * 20))
+        assets.create_asset_record(
+            file_path=image_path,
+            original_name=image_path.name,
+            content_type="image/png",
+            size_bytes=image_path.stat().st_size,
+            batch_id="page-batch",
+        )
+
+    client = TestClient(app)
+    assets_payload = client.get("/api/assets?limit=2&offset=1&batch_id=page-batch").json()
+
+    assert assets_payload["limit"] == 2
+    assert assets_payload["offset"] == 1
+    assert assets_payload["total"] == 3
+    assert len(assets_payload["assets"]) == 2
+
+
+def test_content_based_coarse_classification_detects_white_bg_and_multi_product(tmp_path):
+    white_bg = tmp_path / "IMG_1234.jpg"
+    image = Image.new("RGB", (800, 800), (250, 250, 250))
+    image.save(white_bg)
+    assert assets.inspect_upload_image(white_bg)["content_signals"]["white_background"] is True
+
+    multi = tmp_path / "IMG_5678.jpg"
+    image = Image.new("RGB", (800, 800), (250, 250, 250))
+    for box in [(70, 220, 230, 600), (320, 210, 480, 600), (570, 230, 720, 610)]:
+        for x in range(box[0], box[2]):
+            for y in range(box[1], box[3]):
+                image.putpixel((x, y), (30, 30, 30))
+    image.save(multi)
+    signals = assets.inspect_upload_image(multi)["content_signals"]
+    classification = assets.classify_with_content(
+        original_name="IMG_5678.jpg",
+        source_type="uploaded",
+        metadata={"width": 800, "height": 800, "ingestion_status": "ingested", "content_signals": signals},
+        duplicate_status="unique",
+    )
+    assert classification["asset_type"] == "multi_product_photo"
+
+
+def test_review_resolution_updates_asset_and_records_learning(isolated_db, tmp_path):
+    import_catalog_records([{"brand": "On", "product_name": "Cloudmonster", "category": "Shoes"}])
+    image_path = tmp_path / "IMG_review.png"
+    make_solid_image(image_path, (30, 60, 90))
+    asset = assets.create_asset_record(
+        file_path=image_path,
+        original_name=image_path.name,
+        content_type="image/png",
+        size_bytes=image_path.stat().st_size,
+        batch_id="resolve-batch",
+    )
+    with database.connect() as conn:
+        review = conn.execute("SELECT * FROM review_queue WHERE item_id = ?", (asset["id"],)).fetchone()
+        if review is None:
+            from app.review import enqueue_review_item
+
+            review = enqueue_review_item(conn, item_type="asset", item_id=asset["id"], reason="unknown", payload={})
+        from app.review import resolve_review_item
+
+        result = resolve_review_item(
+            conn,
+            review_id=review["id"],
+            resolution={
+                "asset_type": "human_wearing_photo",
+                "product_name": "Cloudmonster",
+                "brand": "On",
+                "correction_reason": "manual verified from product view",
+            },
+            resolved_by="tester",
+        )
+        row = conn.execute("SELECT * FROM assets WHERE id = ?", (asset["id"],)).fetchone()
+        correction = conn.execute("SELECT * FROM human_corrections WHERE target_id = ?", (asset["id"],)).fetchone()
+
+    assert result["learning_actions"]["asset_updated"] is True
+    assert row["asset_type"] == "human_wearing_photo"
+    assert correction is not None
+
+
 def test_low_confidence_match_enters_review_queue(isolated_db, tmp_path, monkeypatch):
     def fake_openai(*args, **kwargs):
         return {
@@ -932,7 +1046,7 @@ def test_low_confidence_match_enters_review_queue(isolated_db, tmp_path, monkeyp
 
     assert asset["id"]
     assert process_pending_jobs()["processed"] == 1
-    observations = vision.latest_observations()
+    observations = vision.latest_observations()["observations"]
     assert observations[0]["structured_output"]["product_name"] == "Unknown"
     assert observations[0]["structured_output"]["product_match"]["decision"] == "review"
     with database.connect() as conn:
