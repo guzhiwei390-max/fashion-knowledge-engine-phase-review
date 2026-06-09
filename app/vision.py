@@ -6,8 +6,11 @@ from typing import Any
 from PIL import Image, UnidentifiedImageError
 
 from .catalog import list_catalog, match_official_product, match_official_product_by_visual_signature
+from .confidence import evaluate_match_confidence
 from .database import connect, decode_json, encode_json, utc_now
+from .evidence import build_match_evidence
 from .openai_vision import analyze_image_with_openai, empty_product_structure
+from .review import enqueue_review_item
 from .structure import structure_evidence_from_observation
 from .unknown import UNKNOWN
 from .visual import image_signature
@@ -61,14 +64,17 @@ def classify_from_evidence(
     product_structure = openai_analysis["product_structure"]
     structure_source = UNKNOWN
     official_product = None
+    candidate_product = None
     match_method = UNKNOWN
     match_confidence = 0.0
+    conflict = False
 
     if signature.get("result") != UNKNOWN:
         official_product = match_official_product_by_visual_signature(signature)
         if official_product:
             match_method = "visual_reference"
             match_confidence = float(official_product.get("visual_match_confidence", 0.0))
+            candidate_product = official_product
 
     needs_structure_detail = needs_structure_analysis_from_signature(official_product, signature)
     should_call_openai = should_call_openai_vision(official_product, match_confidence, needs_structure_detail)
@@ -77,27 +83,42 @@ def classify_from_evidence(
         product_structure = openai_analysis.get("product_structure", empty_product_structure())
         structure_source = "openai_vision_structure"
 
-    if not official_product:
-        openai_match = openai_analysis.get("product_match", {})
-        if openai_match.get("result") == "Known" and float(openai_match.get("confidence", 0.0) or 0.0) >= 0.86:
-            candidate_text = f"{openai_match.get('brand', '')} {openai_match.get('product_name', '')}"
-            official_product = match_official_product(candidate_text)
-            if official_product:
+    openai_match = openai_analysis.get("product_match", {})
+    if openai_match.get("result") == "Known":
+        candidate_text = f"{openai_match.get('brand', '')} {openai_match.get('product_name', '')}"
+        openai_product = match_official_product(candidate_text)
+        if openai_product:
+            candidate_product = openai_product
+            openai_confidence = float(openai_match.get("confidence", 0.0) or 0.0)
+            if official_product and official_product["id"] != openai_product["id"]:
+                conflict = True
+                match_method = "conflict"
+                match_confidence = min(match_confidence, openai_confidence)
+            elif not official_product:
+                official_product = openai_product
                 match_method = "openai_vision_structure"
-                match_confidence = float(openai_match.get("confidence", 0.0))
+                match_confidence = openai_confidence
 
-    if not official_product:
+    if not official_product and not candidate_product:
         official_product = match_official_product(evidence_text)
         if official_product:
+            candidate_product = official_product
             match_method = "text_evidence_assist"
             match_confidence = 0.65
 
-    if official_product:
-        brand = official_product["brand"]
-        product_name = official_product["product_name"]
-        aliases = official_product["aliases"]
-        category = official_product["category"]
-        material = official_product["material"]
+    decision = evaluate_match_confidence(
+        confidence=match_confidence,
+        has_official_match=official_product is not None,
+        conflict=conflict,
+    )
+    accepted_product = official_product if decision.accepted else None
+
+    if accepted_product:
+        brand = accepted_product["brand"]
+        product_name = accepted_product["product_name"]
+        aliases = accepted_product["aliases"]
+        category = accepted_product["category"]
+        material = accepted_product["material"]
     else:
         brand = UNKNOWN
         product_name = UNKNOWN
@@ -111,6 +132,14 @@ def classify_from_evidence(
         asset_id=asset_id,
         source=structure_source if structure_source != UNKNOWN else "official_visual_reference",
         confidence=match_confidence,
+    )
+    match_evidence = build_match_evidence(
+        official_product=accepted_product,
+        candidate_product=candidate_product,
+        confidence=match_confidence,
+        method=match_method,
+        structure_evidence=product_structure_evidence,
+        vision_reasons=openai_match.get("why", []),
     )
 
     asset_type = UNKNOWN
@@ -142,14 +171,18 @@ def classify_from_evidence(
         "product_structure": product_structure,
         "structure_evidence": product_structure_evidence,
         "product_match": {
+            "decision": decision.decision,
+            "review_reason": decision.reason if decision.requires_review else UNKNOWN,
             "method": match_method,
             "confidence": match_confidence,
             "openai_vision_called": should_call_openai,
             "why": openai_analysis.get("product_match", {}).get("why", []),
+            "evidence": match_evidence,
         },
+        "match_evidence": match_evidence,
         "contains_human": UNKNOWN,
         "quality_score": UNKNOWN,
-        "unknown_fields": unknown_fields,
+        "unknown_fields": sorted(set(unknown_fields + match_evidence.get("uncertain_fields", []))),
     }
 
 
@@ -265,6 +298,7 @@ def process_pending_jobs(limit: int = 5000) -> dict[str, Any]:
                 asset = dict(job)
                 analysis = analyze_asset(asset)
                 structured = analysis["structured_output"]
+                observation_id = str(uuid.uuid4())
                 conn.execute(
                     """
                     INSERT INTO vision_observations (
@@ -274,7 +308,7 @@ def process_pending_jobs(limit: int = 5000) -> dict[str, Any]:
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        str(uuid.uuid4()),
+                        observation_id,
                         job["asset_id"],
                         job["id"],
                         encode_json(analysis["raw_output"]),
@@ -285,6 +319,33 @@ def process_pending_jobs(limit: int = 5000) -> dict[str, Any]:
                         utc_now(),
                     ),
                 )
+                product_match = structured.get("product_match", {})
+                if product_match.get("decision") == "review":
+                    enqueue_review_item(
+                        conn,
+                        item_type="vision_observation",
+                        item_id=observation_id,
+                        reason=product_match.get("review_reason", "low_confidence"),
+                        confidence=float(product_match.get("confidence", 0.0) or 0.0),
+                        payload={
+                            "asset_id": job["asset_id"],
+                            "product_match": product_match,
+                            "unknown_fields": structured.get("unknown_fields", []),
+                        },
+                    )
+                elif structured.get("product_name") == UNKNOWN:
+                    enqueue_review_item(
+                        conn,
+                        item_type="vision_observation",
+                        item_id=observation_id,
+                        reason="unknown",
+                        confidence=float(product_match.get("confidence", 0.0) or 0.0),
+                        payload={
+                            "asset_id": job["asset_id"],
+                            "product_match": product_match,
+                            "unknown_fields": structured.get("unknown_fields", []),
+                        },
+                    )
                 conn.execute(
                     "UPDATE analysis_jobs SET status = 'completed', finished_at = ? WHERE id = ?",
                     (utc_now(), job["id"]),

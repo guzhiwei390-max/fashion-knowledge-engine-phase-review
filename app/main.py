@@ -23,6 +23,7 @@ from .config import DATA_DIR, UPLOAD_DIR
 from .database import connect, decode_json, init_db
 from .knowledge import build_knowledge, list_knowledge_cards, search_knowledge
 from .pipelines import pipeline_design
+from .review import list_review_items, resolve_review_item
 from .unknown import unknown_response
 from .vision import latest_observations, process_pending_jobs
 
@@ -206,6 +207,25 @@ def list_batches() -> dict:
 @app.get("/api/observations")
 def observations() -> dict:
     return {"observations": latest_observations()}
+
+
+@app.get("/api/review-queue")
+def review_queue(status: str | None = None) -> dict:
+    with connect() as conn:
+        return {"review_queue": list_review_items(conn, status=status)}
+
+
+@app.post("/api/review-queue/{review_id}/resolve")
+async def resolve_review_queue_item(review_id: str, resolution: dict) -> dict:
+    with connect() as conn:
+        result = resolve_review_item(
+            conn,
+            review_id=review_id,
+            resolution=resolution,
+            resolved_by=str(resolution.get("resolved_by", "admin")),
+        )
+    build_knowledge()
+    return result
 
 
 @app.get("/api/knowledge-cards")
@@ -423,6 +443,10 @@ ADMIN_HTML = """
       </section>
     </div>
     <section>
+      <h2>Human Review Queue</h2>
+      <div id="reviewQueue" class="cards"></div>
+    </section>
+    <section>
       <h2>Knowledge Cards</h2>
       <div id="cards" class="cards"></div>
     </section>
@@ -471,7 +495,7 @@ ADMIN_HTML = """
       await refreshAll();
     }
     async function refreshAll() {
-      const [assets, jobs, cards, catalog, officialAssets, visualReferences, observations, batches] = await Promise.all([
+      const [assets, jobs, cards, catalog, officialAssets, visualReferences, observations, batches, reviewQueue] = await Promise.all([
         fetch("/api/assets").then(r => r.json()),
         fetch("/api/jobs").then(r => r.json()),
         fetch("/api/knowledge-cards").then(r => r.json()),
@@ -479,7 +503,8 @@ ADMIN_HTML = """
         fetch("/api/catalog/assets").then(r => r.json()),
         fetch("/api/catalog/visual-references").then(r => r.json()),
         fetch("/api/observations").then(r => r.json()),
-        fetch("/api/batches").then(r => r.json())
+        fetch("/api/batches").then(r => r.json()),
+        fetch("/api/review-queue?status=pending").then(r => r.json())
       ]);
       renderAssets(assets.assets);
       renderJobs(jobs.jobs);
@@ -489,6 +514,7 @@ ADMIN_HTML = """
       renderVisualReferences(visualReferences.visual_references);
       renderObservations(observations.observations);
       renderBatches(batches.batches);
+      renderReviewQueue(reviewQueue.review_queue);
     }
     document.querySelector("#catalogForm").addEventListener("submit", e => {
       e.preventDefault(); postForm("/api/catalog/import", e.currentTarget);
@@ -523,6 +549,9 @@ ADMIN_HTML = """
     }
     function renderBatches(rows) {
       document.querySelector("#batches").innerHTML = rows.map(b => item(`<strong>${esc(b.batch_id)}</strong><div class="meta">total ${b.total} / processed ${b.processed || 0} / matched ${b.matched || 0} / unknown ${b.unknown || 0} / failed ${b.failed || 0}</div>`)).join("") || "<div class='meta'>No batches</div>";
+    }
+    function renderReviewQueue(rows) {
+      document.querySelector("#reviewQueue").innerHTML = rows.map(r => item(`<strong>${esc(r.reason)}</strong><div class="meta">${esc(r.item_type)} / ${esc(r.item_id)}<br>confidence: ${esc(r.confidence)}<br>${esc(JSON.stringify(r.review_payload || {}))}</div>`)).join("") || "<div class='meta'>No pending review items</div>";
     }
     function renderObservations(rows) {
       document.querySelector("#observations").innerHTML = rows.map(o => {

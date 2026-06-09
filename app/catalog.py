@@ -310,6 +310,10 @@ def official_image_candidates(record: dict[str, Any]) -> list[tuple[str, str]]:
         "official_model": "official_model",
         "official_detail": "official_detail",
         "official_fabric": "official_fabric",
+        "official_logo": "official_logo",
+        "official_zipper": "official_zipper",
+        "official_hardware": "official_hardware",
+        "official_stitching": "official_stitching",
     }
     candidates: list[tuple[str, str]] = []
     for field, asset_type in fields.items():
@@ -634,6 +638,19 @@ def import_catalog_records(records: list[dict[str, Any]], import_type: str = "ma
             if product_name not in aliases:
                 aliases.append(product_name)
             colors = parse_list(record.get("colors", []))
+            product_family = str(record.get("product_family", UNKNOWN)).strip() or UNKNOWN
+            variant = str(record.get("variant", UNKNOWN)).strip() or UNKNOWN
+            official_fields = {
+                "brand": brand,
+                "product_name": product_name,
+                "product_family": product_family,
+                "variant": variant,
+                "aliases": aliases,
+                "category": str(record.get("category", UNKNOWN)).strip() or UNKNOWN,
+                "colors": colors,
+                "material": str(record.get("material", UNKNOWN)).strip() or UNKNOWN,
+                "source": "official_catalog",
+            }
             product_id = str(uuid.uuid4())
             existing = conn.execute(
                 "SELECT id FROM official_products WHERE brand = ? AND product_name = ?",
@@ -644,11 +661,13 @@ def import_catalog_records(records: list[dict[str, Any]], import_type: str = "ma
             conn.execute(
                 """
                 INSERT INTO official_products (
-                    id, brand, product_name, aliases, category, description,
-                    colors, material, official_url, import_type, created_at, updated_at
+                    id, brand, product_name, product_family, variant, aliases, category, description,
+                    colors, material, official_url, import_type, official_fields_json, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(brand, product_name) DO UPDATE SET
+                    product_family = excluded.product_family,
+                    variant = excluded.variant,
                     aliases = excluded.aliases,
                     category = excluded.category,
                     description = excluded.description,
@@ -656,12 +675,15 @@ def import_catalog_records(records: list[dict[str, Any]], import_type: str = "ma
                     material = excluded.material,
                     official_url = excluded.official_url,
                     import_type = excluded.import_type,
+                    official_fields_json = excluded.official_fields_json,
                     updated_at = excluded.updated_at
                 """,
                 (
                     product_id,
                     brand,
                     product_name,
+                    product_family,
+                    variant,
                     encode_json(aliases),
                     str(record.get("category", UNKNOWN)).strip() or UNKNOWN,
                     str(record.get("description", UNKNOWN)).strip() or UNKNOWN,
@@ -669,10 +691,12 @@ def import_catalog_records(records: list[dict[str, Any]], import_type: str = "ma
                     str(record.get("material", UNKNOWN)).strip() or UNKNOWN,
                     str(record.get("official_url", "")).strip(),
                     import_type,
+                    encode_json(official_fields),
                     now,
                     now,
                 ),
             )
+            import_product_aliases(conn, product_id, product_name, aliases, colors)
             import_official_assets(conn, product_id, record, import_type=import_type)
             imported += 1
     return {"imported": imported, "skipped": skipped, "catalog_count": catalog_count()}
@@ -701,6 +725,10 @@ def import_official_assets(conn, product_id: str, record: dict[str, Any], import
         "official_model": "official_model",
         "official_detail": "official_detail",
         "official_fabric": "official_fabric",
+        "official_logo": "official_logo",
+        "official_zipper": "official_zipper",
+        "official_hardware": "official_hardware",
+        "official_stitching": "official_stitching",
     }
     now = utc_now()
     for field, asset_type in asset_fields.items():
@@ -712,6 +740,25 @@ def import_official_assets(conn, product_id: str, record: dict[str, Any], import
                 """,
                 (str(uuid.uuid4()), product_id, asset_type, uri, import_type, now),
             )
+
+
+def import_product_aliases(conn, product_id: str, product_name: str, aliases: list[str], colors: list[str]) -> None:
+    now = utc_now()
+    values: list[tuple[str, str]] = [(product_name, "official_name")]
+    values.extend((alias, "name_alias") for alias in aliases)
+    values.extend((color, "color_alias") for color in colors)
+    for alias, alias_type in values:
+        cleaned = str(alias).strip()
+        if not cleaned:
+            continue
+        conn.execute(
+            """
+            INSERT INTO product_aliases (id, product_id, alias, alias_type, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(product_id, alias, alias_type) DO NOTHING
+            """,
+            (str(uuid.uuid4()), product_id, cleaned, alias_type, now),
+        )
 
 
 def list_catalog() -> list[dict[str, Any]]:

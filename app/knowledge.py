@@ -125,11 +125,6 @@ def build_product_dna(brand: str, product_name: str, observations: list[dict[str
         "category": first_known(structured_items, "category", unknown_fields),
         "material": first_known(structured_items, "material", unknown_fields),
         "fit": evidence_or_unknown("fit", structure, unknown_fields),
-        "collar": evidence_or_unknown("collar", structure_evidence, unknown_fields),
-        "zipper": evidence_or_unknown("zipper", structure_evidence, unknown_fields),
-        "logo_position": evidence_or_unknown("logo_position", structure_evidence, unknown_fields),
-        "back_structure": evidence_or_unknown("back_structure", structure_evidence, unknown_fields),
-        "material_behavior": evidence_or_unknown("material_behavior", structure_evidence, unknown_fields),
         "product_structure": structure,
         "structure_evidence": structure_evidence,
         "must_have": must_have_from_structure(structure),
@@ -137,6 +132,8 @@ def build_product_dna(brand: str, product_name: str, observations: list[dict[str
         "evidence_count": len(evidence_asset_ids),
         "unknown_fields": [],
     }
+    for field in STRUCTURE_EVIDENCE_FIELDS:
+        product_dna[field] = evidence_or_unknown(field, structure_evidence, unknown_fields)
 
     for field in STRUCTURE_EVIDENCE_FIELDS:
         if structure_evidence.get(field, {}).get("result") != "Known":
@@ -164,7 +161,7 @@ def evidence_or_unknown(
 
 def must_have_from_structure(structure: dict[str, Any]) -> list[str]:
     must_have: list[str] = []
-    for field in ("garment_type", "collar", "zipper", "sleeve", "logo_position", "back_structure", "material_behavior", "fit"):
+    for field in ("garment_type", *STRUCTURE_EVIDENCE_FIELDS, "sleeve", "fit"):
         value = structure.get(field)
         if value not in (None, "", UNKNOWN):
             must_have.append(f"{field}: {value}")
@@ -176,16 +173,7 @@ def merge_product_structure(structured_items: list[dict[str, Any]]) -> dict[str,
         "visible_evidence": [],
         "unknown_fields": [],
     }
-    fields = [
-        "garment_type",
-        "collar",
-        "zipper",
-        "sleeve",
-        "logo_position",
-        "back_structure",
-        "material_behavior",
-        "fit",
-    ]
+    fields = ["garment_type", "sleeve", "fit", *STRUCTURE_EVIDENCE_FIELDS]
     for field in fields:
         merged[field] = UNKNOWN
     for item in structured_items:
@@ -194,6 +182,10 @@ def merge_product_structure(structured_items: list[dict[str, Any]]) -> dict[str,
             structure["logo_position"] = structure["logo"]
         if structure.get("material_behavior") in (None, "", UNKNOWN) and structure.get("material_visual_behavior") not in (None, "", UNKNOWN):
             structure["material_behavior"] = structure["material_visual_behavior"]
+        if structure.get("sleeve_structure") in (None, "", UNKNOWN) and structure.get("sleeve") not in (None, "", UNKNOWN):
+            structure["sleeve_structure"] = structure["sleeve"]
+        if structure.get("fit_shape") in (None, "", UNKNOWN) and structure.get("fit") not in (None, "", UNKNOWN):
+            structure["fit_shape"] = structure["fit"]
         for field in fields:
             if merged[field] == UNKNOWN and structure.get(field) not in (None, "", UNKNOWN):
                 merged[field] = structure[field]
@@ -247,7 +239,7 @@ def build_dna_suite(
 def build_garment_validation_rules(product_dna: dict[str, Any], evidence_asset_ids: list[str]) -> dict[str, Any]:
     structure = product_dna.get("product_structure", {})
     must_have = []
-    for field in ("garment_type", "collar", "zipper", "sleeve", "logo_position", "back_structure", "material_behavior", "fit"):
+    for field in ("garment_type", *STRUCTURE_EVIDENCE_FIELDS, "sleeve", "fit"):
         value = structure.get(field)
         if value not in (None, "", UNKNOWN):
             must_have.append(f"{field}: {value}")
@@ -257,7 +249,7 @@ def build_garment_validation_rules(product_dna: dict[str, Any], evidence_asset_i
             must_have.append(f"{field}: {value}")
     unknown_fields = [
         field
-        for field in ("collar", "zipper", "logo_position", "back_structure", "material_behavior", "material", "category")
+        for field in (*STRUCTURE_EVIDENCE_FIELDS, "material", "category")
         if product_dna_field_unknown(product_dna.get(field))
     ]
     return {

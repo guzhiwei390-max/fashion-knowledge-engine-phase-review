@@ -58,6 +58,9 @@ def init_db() -> None:
                 source_id TEXT,
                 external_ref_uri TEXT,
                 ingestion_metadata TEXT NOT NULL DEFAULT '{}',
+                visual_signature TEXT NOT NULL DEFAULT '{}',
+                duplicate_of_asset_id TEXT,
+                duplicate_status TEXT NOT NULL DEFAULT 'unique',
                 upload_batch_id TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
@@ -189,6 +192,10 @@ def init_db() -> None:
                 status TEXT NOT NULL DEFAULT 'pending',
                 confidence REAL NOT NULL DEFAULT 0,
                 conflict_json TEXT NOT NULL DEFAULT '{}',
+                review_payload TEXT NOT NULL DEFAULT '{}',
+                resolution_json TEXT NOT NULL DEFAULT '{}',
+                resolved_by TEXT,
+                resolved_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -287,6 +294,9 @@ def init_db() -> None:
         ensure_column(conn, "assets", "source_id", "TEXT")
         ensure_column(conn, "assets", "external_ref_uri", "TEXT")
         ensure_column(conn, "assets", "ingestion_metadata", "TEXT NOT NULL DEFAULT '{}'")
+        ensure_column(conn, "assets", "visual_signature", "TEXT NOT NULL DEFAULT '{}'")
+        ensure_column(conn, "assets", "duplicate_of_asset_id", "TEXT")
+        ensure_column(conn, "assets", "duplicate_status", "TEXT NOT NULL DEFAULT 'unique'")
         ensure_column(conn, "official_product_assets", "local_file_uri", "TEXT")
         ensure_column(conn, "official_product_assets", "visual_signature", "TEXT NOT NULL DEFAULT '{}'")
         ensure_column(conn, "official_products", "import_type", "TEXT NOT NULL DEFAULT 'manual_import'")
@@ -310,6 +320,10 @@ def init_db() -> None:
         ensure_column(conn, "dna_records", "truth_layer", "TEXT NOT NULL DEFAULT 'reality_truth'")
         ensure_column(conn, "retrieval_queries", "pipeline_type", "TEXT NOT NULL DEFAULT 'internal_upload'")
         ensure_column(conn, "retrieval_queries", "truth_layer", "TEXT NOT NULL DEFAULT 'reality_truth'")
+        ensure_column(conn, "review_queue", "review_payload", "TEXT NOT NULL DEFAULT '{}'")
+        ensure_column(conn, "review_queue", "resolution_json", "TEXT NOT NULL DEFAULT '{}'")
+        ensure_column(conn, "review_queue", "resolved_by", "TEXT")
+        ensure_column(conn, "review_queue", "resolved_at", "TEXT")
         seed_source_type_registry(conn)
 
 

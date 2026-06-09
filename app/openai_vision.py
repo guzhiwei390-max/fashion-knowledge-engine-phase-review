@@ -46,9 +46,15 @@ def empty_product_structure() -> dict[str, Any]:
         "collar": UNKNOWN,
         "zipper": UNKNOWN,
         "sleeve": UNKNOWN,
+        "sleeve_structure": UNKNOWN,
         "logo": UNKNOWN,
         "logo_position": UNKNOWN,
+        "stitching": UNKNOWN,
         "back_structure": UNKNOWN,
+        "hem_shape": UNKNOWN,
+        "fit_shape": UNKNOWN,
+        "pocket": UNKNOWN,
+        "hardware": UNKNOWN,
         "material_visual_behavior": UNKNOWN,
         "material_behavior": UNKNOWN,
         "fit": UNKNOWN,
@@ -58,9 +64,15 @@ def empty_product_structure() -> dict[str, Any]:
             "collar",
             "zipper",
             "sleeve",
+            "sleeve_structure",
             "logo",
             "logo_position",
+            "stitching",
             "back_structure",
+            "hem_shape",
+            "fit_shape",
+            "pocket",
+            "hardware",
             "material_visual_behavior",
             "material_behavior",
             "fit",
@@ -89,7 +101,7 @@ def analyze_image_with_openai(file_uri: str, official_candidates: list[dict[str,
             "Use only visible image evidence and provided official catalog candidates.",
             "Do not guess a product. If uncertain, set product_match.result to Unknown.",
             "Explain why the product matches using visible garment structure.",
-            "For structure, detect collar, zipper, logo position, back structure, and material behavior only when visible.",
+            "For structure, detect only visible evidence: collar, zipper, logo_position, stitching, back_structure, sleeve_structure, hem_shape, fit_shape, pocket, hardware, material_behavior.",
             "Return JSON only.",
         ],
         "official_candidates": candidate_summary,
@@ -163,6 +175,10 @@ def normalize_product_structure(value: dict[str, Any]) -> dict[str, Any]:
         structure["logo_position"] = structure["logo"]
     if structure.get("material_behavior") in (None, "", UNKNOWN) and structure.get("material_visual_behavior") not in (None, "", UNKNOWN):
         structure["material_behavior"] = structure["material_visual_behavior"]
+    if structure.get("sleeve_structure") in (None, "", UNKNOWN) and structure.get("sleeve") not in (None, "", UNKNOWN):
+        structure["sleeve_structure"] = structure["sleeve"]
+    if structure.get("fit_shape") in (None, "", UNKNOWN) and structure.get("fit") not in (None, "", UNKNOWN):
+        structure["fit_shape"] = structure["fit"]
     unknown_fields = [
         key
         for key, item in structure.items()

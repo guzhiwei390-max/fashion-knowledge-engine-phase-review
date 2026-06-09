@@ -8,8 +8,13 @@ from typing import BinaryIO
 from fastapi import HTTPException, UploadFile
 
 from .config import ALLOWED_IMAGE_EXTENSIONS, MAX_UPLOAD_BYTES, UPLOAD_DIR
-from .database import connect, utc_now
+from .database import connect, encode_json, utc_now
 from .pipelines import PIPELINE_INTERNAL_UPLOAD, TRUTH_COMMUNITY, TRUTH_OFFICIAL, TRUTH_REALITY
+from .review import enqueue_review_item
+from .visual import image_signature, signature_similarity
+
+
+NEAR_DUPLICATE_THRESHOLD = 0.97
 
 
 def is_allowed_image(filename: str) -> bool:
@@ -89,6 +94,7 @@ def create_asset_record(
     batch_id: str,
 ) -> dict:
     asset_hash = sha256_file(file_path)
+    visual_signature = image_signature(str(file_path))
     now = utc_now()
     asset_id = str(uuid.uuid4())
     final_path = _safe_asset_path(batch_id, asset_id, original_name)
@@ -105,7 +111,24 @@ def create_asset_record(
         ).fetchone()
         if duplicate:
             file_path.unlink(missing_ok=True)
+            enqueue_review_item(
+                conn,
+                item_type="asset",
+                item_id=duplicate["id"],
+                reason="duplicate",
+                confidence=1.0,
+                payload={
+                    "duplicate_type": "exact",
+                    "existing_asset_id": duplicate["id"],
+                    "incoming_original_name": original_name,
+                    "sha256": asset_hash,
+                },
+            )
             return dict(duplicate)
+
+        near_duplicate = find_near_duplicate(conn, visual_signature)
+        duplicate_of_asset_id = near_duplicate["id"] if near_duplicate else None
+        duplicate_status = "near_duplicate" if near_duplicate else "unique"
 
         shutil.move(str(file_path), final_path)
         conn.execute(
@@ -113,9 +136,10 @@ def create_asset_record(
             INSERT INTO assets (
                 id, file_uri, original_name, sha256, content_type, size_bytes,
                 source_type, knowledge_layer, pipeline_type, truth_layer,
-                ingestion_metadata, upload_batch_id, created_at
+                ingestion_metadata, visual_signature, duplicate_of_asset_id,
+                duplicate_status, upload_batch_id, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?)
             """,
             (
                 asset_id,
@@ -128,6 +152,9 @@ def create_asset_record(
                 knowledge_layer,
                 PIPELINE_INTERNAL_UPLOAD,
                 truth_layer,
+                encode_json(visual_signature),
+                duplicate_of_asset_id,
+                duplicate_status,
                 batch_id,
                 now,
             ),
@@ -141,6 +168,20 @@ def create_asset_record(
             """,
             (str(uuid.uuid4()), asset_id, now),
         )
+        if near_duplicate:
+            enqueue_review_item(
+                conn,
+                item_type="asset",
+                item_id=asset_id,
+                reason="near_duplicate",
+                confidence=float(near_duplicate["score"]),
+                payload={
+                    "duplicate_type": "near",
+                    "existing_asset_id": near_duplicate["id"],
+                    "incoming_original_name": original_name,
+                    "similarity": near_duplicate["score"],
+                },
+            )
 
     return {
         "id": asset_id,
@@ -153,9 +194,33 @@ def create_asset_record(
         "knowledge_layer": knowledge_layer,
         "pipeline_type": PIPELINE_INTERNAL_UPLOAD,
         "truth_layer": truth_layer,
+        "visual_signature": visual_signature,
+        "duplicate_of_asset_id": duplicate_of_asset_id,
+        "duplicate_status": duplicate_status,
         "upload_batch_id": batch_id,
         "created_at": now,
     }
+
+
+def find_near_duplicate(conn, signature: dict) -> dict | None:
+    if signature.get("result") == "Unknown":
+        return None
+    rows = conn.execute(
+        """
+        SELECT id, visual_signature
+        FROM assets
+        WHERE visual_signature IS NOT NULL
+          AND visual_signature != '{}'
+        ORDER BY created_at DESC
+        LIMIT 200
+        """
+    ).fetchall()
+    best: dict | None = None
+    for row in rows:
+        score = signature_similarity(signature, row["visual_signature"])
+        if score >= NEAR_DUPLICATE_THRESHOLD and (best is None or score > best["score"]):
+            best = {"id": row["id"], "score": score}
+    return best
 
 
 async def save_upload_file(file: UploadFile, batch_id: str) -> dict:

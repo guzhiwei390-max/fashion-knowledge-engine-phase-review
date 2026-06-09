@@ -7,7 +7,13 @@ STRUCTURE_EVIDENCE_FIELDS = (
     "collar",
     "zipper",
     "logo_position",
+    "stitching",
     "back_structure",
+    "sleeve_structure",
+    "hem_shape",
+    "fit_shape",
+    "pocket",
+    "hardware",
     "material_behavior",
 )
 
@@ -42,6 +48,10 @@ def normalize_structure_aliases(structure: dict[str, Any]) -> dict[str, Any]:
         normalized["logo_position"] = normalized["logo"]
     if known(normalized.get("material_visual_behavior")) and not known(normalized.get("material_behavior")):
         normalized["material_behavior"] = normalized["material_visual_behavior"]
+    if known(normalized.get("sleeve")) and not known(normalized.get("sleeve_structure")):
+        normalized["sleeve_structure"] = normalized["sleeve"]
+    if known(normalized.get("fit")) and not known(normalized.get("fit_shape")):
+        normalized["fit_shape"] = normalized["fit"]
     return normalized
 
 

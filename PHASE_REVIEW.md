@@ -1,34 +1,26 @@
 # Current Version
 
-Current Version: Phase 1 Foundation Review v0.3
+当前版本号：Phase 1 Hardening Review v0.4
 
-Current Commit Hash: e2c90db
+当前 Commit Hash：pending until commit; see final response for exact hash
 
-Current Branch: master
+当前 Branch：master
 
 ---
 
 # Added
 
-- Official Catalog Importer
-- Category-tree catalog import reservation and limited implementation
-- Official Product Assets
-- Official Product Visual Reference Library
-- Catalog-first visual matching
-- Conditional OpenAI Vision structure analysis
-- Product Structure Evidence
-- Product DNA
-- Garment Validation Rules
-- Material DNA, Outfit DNA, Tribe DNA, Scene DNA, Customer Reality DNA, Trend DNA placeholders
-- Knowledge Card generation
-- Unknown-first mechanism
-- Batch upload and zip import
-- Batch progress summary
-- Human correction API and admin entry
-- Pipeline architecture reservation for Internal Upload and External Knowledge
-- Source Type registry
-- Truth-layer reservation: Official Truth, Reality Truth, Community Truth
-- Read-only pipeline design API
+本次新增功能：
+
+- Brand-agnostic Product Structure Engine fields
+- Central Confidence Engine
+- Evidence Engine
+- Real Human Review Queue workflow foundation
+- Exact duplicate and near duplicate detection
+- Official product alias, family, variant, color alias storage
+- Expanded Official Product Assets for logo, zipper, hardware, stitching
+- Architecture decision log
+- Regression tests for Unknown-first, confidence routing, evidence output, review queue, duplicate handling, and architecture rules
 
 ---
 
@@ -36,34 +28,15 @@ Current Branch: master
 
 新增表：
 
-- assets
-- source_type_registry
-- ingestion_sources
-- pipeline_runs
-- external_knowledge_items
-- official_products
-- official_product_assets
-- official_product_visual_references
-- product_aliases
-- review_queue
-- analysis_jobs
-- vision_observations
-- human_corrections
-- knowledge_cards
-- dna_records
-- retrieval_queries
-- knowledge_source_index
+- No new primary domain table in this iteration
 
 修改表：
 
-- assets: added pipeline_type, truth_layer, source_id, external_ref_uri, ingestion_metadata
-- official_products: added product_family, variant, truth_layer, truth_locked, official_fields_json, supplemental_fields_json
-- official_product_assets: added local_file_uri, visual_signature, source_type, pipeline_type, truth_layer
-- official_product_visual_references: added truth_layer
-- vision_observations: added product_structure
-- knowledge_cards: added source_type, pipeline_type, truth_layer
-- dna_records: added source_type, pipeline_type, truth_layer
-- retrieval_queries: added pipeline_type, truth_layer
+- assets: added visual_signature, duplicate_of_asset_id, duplicate_status
+- review_queue: added review_payload, resolution_json, resolved_by, resolved_at
+- official_products: official_fields_json now captures official catalog identity fields during import
+- product_aliases: now populated during official catalog import for product names, aliases, and colors
+- official_product_assets: now supports official_logo, official_zipper, official_hardware, official_stitching
 
 ---
 
@@ -71,34 +44,16 @@ Current Branch: master
 
 新增接口：
 
-- GET /api/health
-- GET /
-- POST /api/catalog/import
-- POST /api/catalog/import-url
-- POST /api/catalog/import-tree
-- GET /api/catalog
-- GET /api/catalog/assets
-- GET /api/catalog/visual-references
-- POST /api/catalog/visual-reference
-- POST /api/upload
-- POST /api/import/zip
-- POST /api/jobs/process
-- GET /api/assets
-- GET /api/jobs
-- GET /api/batches
-- GET /api/observations
-- GET /api/knowledge-cards
-- GET /api/search
-- POST /api/search
-- POST /api/corrections
-- GET /api/pipelines/design
-- GET /api/source-types
+- GET /api/review-queue
+- POST /api/review-queue/{review_id}/resolve
 
 修改接口：
 
-- POST /api/upload: blocked until Official Product Catalog exists
-- POST /api/import/zip: blocked until Official Product Catalog exists
-- POST /api/jobs/process: processes queue and rebuilds knowledge records
+- POST /api/upload: now stores visual signatures and duplicate metadata
+- POST /api/import/zip: now inherits duplicate handling through asset creation
+- POST /api/jobs/process: now auto-enqueues Unknown and Low Confidence observations for human review
+- POST /api/catalog/import: now records product family, variant, aliases, color aliases, and expanded official asset types
+- GET /: admin UI now shows pending Human Review Queue
 
 ---
 
@@ -106,17 +61,14 @@ Current Branch: master
 
 本次架构调整：
 
-- Reframed system as a Fashion Knowledge Engine instead of an image gallery.
-- Official Catalog is the first source of truth.
-- Vision is a secondary verification and structure-detail source.
-- Unknown remains higher priority than guessing.
-- Official Truth, Reality Truth, and Community Truth are independently marked.
-- Official Truth is locked and can only be supplemented, not overwritten by user/community data.
-- Product Structure fields are stored as evidence objects, not simple placeholders.
-- OpenAI Vision cannot create products outside Official Product Catalog.
-- External Knowledge Pipeline is reserved only; ingestion is not enabled.
-- Internal Upload Pipeline is reserved and currently maps user uploads to Reality Truth.
-- Source Type registry seeds future sources without requiring database redesign.
+- Product recognition now routes through a central Confidence Engine.
+- Low-confidence matches no longer become hard product identities.
+- Visual hash/color signature matching is treated as an official visual prefilter and evidence input, not the sole business authority.
+- Evidence Engine now returns matched_because, evidence_asset_ids, matched_official_assets, confidence, and uncertain_fields.
+- Human Review Queue is active for Unknown, Low Confidence, Duplicate, and Near Duplicate.
+- Product Structure Engine is brand agnostic and covers collar, zipper, logo_position, stitching, back_structure, sleeve_structure, hem_shape, fit_shape, pocket, hardware, material_behavior.
+- OpenAI Vision remains a secondary verification/detail source and cannot create products outside Official Catalog.
+- Architecture rules are now recorded in ARCHITECTURE_DECISIONS.md.
 
 ---
 
@@ -124,23 +76,18 @@ Current Branch: master
 
 目前已经可以工作的功能：
 
-- Import official catalog records from CSV or JSON.
-- Import a public official product/category URL when accessible and extractable.
-- Import a bounded same-site category tree with robots checks and page limits.
-- Store official products, official product assets, and official visual references.
-- Upload multiple images after catalog is ready.
-- Import images from zip after catalog is ready.
-- Deduplicate uploaded assets by sha256.
-- Match unnamed user images against official visual references.
-- Return Unknown when official product match cannot be proven.
-- Conditionally call OpenAI Vision only for low confidence, no match, or structure-detail needs.
-- Store product structure observations.
-- Build Product DNA and Knowledge Cards from evidence-backed observations.
-- Return all Phase 1 DNA structures in retrieval.
-- Expose batch progress: total, processed, matched, unknown, failed.
-- Allow basic human correction on vision observations.
-- Expose read-only pipeline design and source type registry.
-- Test suite passes.
+- Import official catalog records with product identity fields.
+- Store official visual assets for white background, model, detail, fabric, logo, zipper, hardware, and stitching references.
+- Store product aliases and color aliases to reduce duplicate product identity drift.
+- Upload unnamed images and match them against Official Catalog visual references.
+- Use OpenAI Vision only when matching is missing, low confidence, or structure evidence is needed.
+- Return Unknown when no official product match is proven.
+- Route low confidence product candidates to Human Review Queue.
+- Route exact duplicate and near duplicate uploads to Human Review Queue.
+- Generate Product DNA with brand-agnostic structure evidence.
+- Generate Garment Validation Rules from evidence-backed Product DNA.
+- Retrieve Product DNA, Material DNA, contextual DNA placeholders, and Knowledge Card.
+- Run automated tests: 28 passing.
 
 ---
 
@@ -148,16 +95,13 @@ Current Branch: master
 
 目前已知问题：
 
-- Official Catalog Importer is conservative and may return Needs Manual Import for many modern JS-heavy pages.
-- Category-tree importer is intentionally bounded and not a full crawler.
-- Official visual matching uses lightweight local image signatures, not production-grade embeddings.
-- Product Structure Engine depends on available evidence and optional OpenAI Vision; without evidence, fields remain Unknown.
-- Human review queue is reserved in database but not fully implemented as a workflow.
-- External Knowledge Pipeline is reserved only and not active.
-- Community Truth ingestion is not active.
-- Official image usage is only for identification reference and does not imply commercial-use rights.
-- Admin UI is functional but still minimal.
-- GitHub repository does not include local review zip by design.
+- Official Catalog Importer remains conservative and may return Needs Manual Import for JS-heavy or access-restricted brand pages.
+- Visual matching still uses lightweight local signatures as a Phase 1 prefilter; production-grade embeddings are not implemented yet.
+- OpenAI Vision requires OPENAI_API_KEY; without it, structure fields stay Unknown unless official visual evidence is enough.
+- Near duplicate detection is simple and should be upgraded before very large production batches.
+- Human review resolution records decisions, but richer correction forms and active learning UI are still minimal.
+- Official visual references do not imply commercial usage rights; they are identification references only.
+- Community Truth ingestion remains reserved, not active.
 
 ---
 
@@ -165,12 +109,11 @@ Current Branch: master
 
 我建议下一步开发：
 
-- Finish a brand-agnostic Product Structure Engine focused on Collar, Zipper, Logo Position, Stitching, Back Structure, Sleeve Structure, and Material Behavior.
-- Add a Confidence Engine that centralizes thresholds and Unknown decisions.
-- Add an Evidence Engine that returns matched-because reasons for each product match.
-- Implement Human Review Queue for Unknown, Low Confidence, Conflict, and Duplicate.
-- Expand Product Alias Engine for Product Name, Aliases, Product Family, Variant, and Color.
-- Keep Official Truth locked while allowing Reality Truth and Community Truth to supplement separate knowledge layers.
+- Add product-level visual reference scoring that combines multiple official assets per product.
+- Add manual review resolution that can promote corrected Reality Truth into future matching hints without overwriting Official Truth.
+- Add richer Official Catalog category-page extraction for common structured product-list patterns.
+- Add stronger near-duplicate clustering for large batches.
+- Add product variant and color confidence evidence in Product DNA.
 
 ---
 
@@ -178,11 +121,10 @@ Current Branch: master
 
 请重点审查：
 
-- 是否严格遵守 Unknown-first and no-guessing rules.
-- 是否禁止 Vision 创建 Official Catalog 中不存在的产品。
-- 是否保持 Official Truth > Reality Truth > Community Truth。
-- 是否三种 Truth 独立标记，未来可独立检索。
-- 是否数据库预留足够，未来扩展 Internal Upload Pipeline 和 External Knowledge Pipeline 时不需要重构。
-- 是否 Product Structure Evidence 真的服务于“为什么是这个产品”，而不只是“识别成这个产品”。
-- 是否 Official Catalog Importer 的合规边界足够清晰，不构成暴力爬虫。
-- 是否 Phase 1 没有引入 AI 生图、换装、模特、场景生成、扩图或内容生成。
+- 是否严格遵守 Unknown-first，不猜、不脑补、不创造产品。
+- Confidence Engine 阈值是否合理，是否所有识别都统一走中央判断。
+- Evidence Engine 是否足够解释“为什么是这个产品”。
+- Human Review Queue 是否覆盖 Unknown、Low Confidence、Duplicate、Near Duplicate。
+- Official Truth Lock 是否没有被 Reality Truth 或 Community Truth 覆盖。
+- Product Structure Engine 是否品牌无关，而不是围绕 Define 特化。
+- Phase 1 是否没有引入 AI 生图、换装、模特、场景生成、扩图或内容生成。

@@ -17,9 +17,11 @@ from app.catalog import (
     needs_manual_import,
     require_catalog_ready,
 )
+from app.confidence import HIGH_CONFIDENCE_THRESHOLD, REVIEW_CONFIDENCE_THRESHOLD, evaluate_match_confidence
 from app.database import init_db
 from app.knowledge import build_knowledge, search_knowledge
 from app.pipelines import PIPELINE_EXTERNAL_KNOWLEDGE, PIPELINE_INTERNAL_UPLOAD, TRUTH_OFFICIAL, TRUTH_REALITY, pipeline_design
+from app.structure import STRUCTURE_EVIDENCE_FIELDS
 from app.vision import classify_from_evidence, process_pending_jobs
 import app.vision as vision
 from app.visual import image_signature
@@ -163,15 +165,21 @@ def test_catalog_match_builds_product_dna_and_search(isolated_db, tmp_path):
             }
         ]
     )
-    image_path = tmp_path / "lululemon-define-front.jpg"
-    image_path.write_bytes(
-        bytes.fromhex(
-            "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de0000000c4944415408d763f8ffff3f0005fe02fea73581e50000000049454e44ae426082"
-        )
+    product_id = catalog.list_catalog()[0]["id"]
+    official_image = tmp_path / "official.png"
+    image_path = tmp_path / "IMG_0007.png"
+    make_solid_image(official_image, (18, 18, 18))
+    make_solid_image(image_path, (18, 18, 18))
+    add_official_visual_reference(
+        product_id=product_id,
+        image_path=official_image,
+        original_name="official.png",
+        asset_type="official_white_bg",
+        storage_dir=tmp_path / "data",
     )
     asset = assets.create_asset_record(
         file_path=image_path,
-        original_name="lululemon-define-front.jpg",
+        original_name="IMG_0007.png",
         content_type="image/png",
         size_bytes=image_path.stat().st_size,
         batch_id="test-batch",
@@ -545,7 +553,13 @@ def test_product_structure_understanding_becomes_dna_evidence(isolated_db, tmp_p
                 "collar": "stand collar",
                 "zipper": "full front zipper",
                 "logo_position": "left chest",
+                "stitching": "curved panel stitching",
                 "back_structure": "curved back seam",
+                "sleeve_structure": "long fitted sleeves",
+                "hem_shape": "straight hip hem",
+                "fit_shape": "slim close fit",
+                "pocket": "front zip pockets",
+                "hardware": "small zipper pull",
                 "material_behavior": "low shine, smooth stretch knit",
                 "visible_evidence": ["stand collar", "full front zipper", "left chest logo", "curved back seam"],
                 "unknown_fields": [],
@@ -583,9 +597,197 @@ def test_product_structure_understanding_becomes_dna_evidence(isolated_db, tmp_p
     assert product_dna["collar"]["value"] == "stand collar"
     assert product_dna["zipper"]["value"] == "full front zipper"
     assert product_dna["logo_position"]["value"] == "left chest"
+    assert product_dna["stitching"]["value"] == "curved panel stitching"
     assert product_dna["back_structure"]["source"] == "openai_vision_structure"
+    assert product_dna["sleeve_structure"]["value"] == "long fitted sleeves"
+    assert product_dna["hem_shape"]["value"] == "straight hip hem"
+    assert product_dna["fit_shape"]["value"] == "slim close fit"
+    assert product_dna["pocket"]["value"] == "front zip pockets"
+    assert product_dna["hardware"]["value"] == "small zipper pull"
     assert product_dna["material_behavior"]["value"] == "low shine, smooth stretch knit"
     assert "collar: stand collar" in product_dna["must_have"]
+
+
+def test_structure_engine_fields_are_brand_agnostic():
+    expected = {
+        "collar",
+        "zipper",
+        "logo_position",
+        "stitching",
+        "back_structure",
+        "sleeve_structure",
+        "hem_shape",
+        "fit_shape",
+        "pocket",
+        "hardware",
+        "material_behavior",
+    }
+    assert expected.issubset(set(STRUCTURE_EVIDENCE_FIELDS))
+
+
+def test_confidence_engine_central_thresholds():
+    assert HIGH_CONFIDENCE_THRESHOLD > REVIEW_CONFIDENCE_THRESHOLD
+    assert evaluate_match_confidence(confidence=0.91, has_official_match=True).decision == "accepted"
+    assert evaluate_match_confidence(confidence=0.72, has_official_match=True).reason == "low_confidence"
+    assert evaluate_match_confidence(confidence=0.99, has_official_match=False).decision == "unknown"
+    assert evaluate_match_confidence(confidence=0.99, has_official_match=True, conflict=True).reason == "conflict"
+
+
+def test_low_confidence_match_enters_review_queue(isolated_db, tmp_path, monkeypatch):
+    def fake_openai(*args, **kwargs):
+        return {
+            "result": "Known",
+            "product_match": {
+                "result": "Known",
+                "brand": "On",
+                "product_name": "Cloudmonster",
+                "confidence": 0.72,
+                "why": ["shoe silhouette"],
+            },
+            "product_structure": {"garment_type": "shoe", "visible_evidence": ["shoe silhouette"]},
+        }
+
+    monkeypatch.setattr(vision, "analyze_image_with_openai", fake_openai)
+    import_catalog_records(
+        [
+            {
+                "brand": "On",
+                "product_name": "Cloudmonster",
+                "product_family": "Cloudmonster",
+                "variant": "Road Running",
+                "aliases": "Cloud Monster",
+                "category": "Shoes",
+            }
+        ]
+    )
+    image_path = tmp_path / "IMG_4321.png"
+    make_solid_image(image_path, (110, 120, 130))
+    asset = assets.create_asset_record(
+        file_path=image_path,
+        original_name="IMG_4321.png",
+        content_type="image/png",
+        size_bytes=image_path.stat().st_size,
+        batch_id="review-batch",
+    )
+
+    assert asset["id"]
+    assert process_pending_jobs()["processed"] == 1
+    observations = vision.latest_observations()
+    assert observations[0]["structured_output"]["product_name"] == "Unknown"
+    assert observations[0]["structured_output"]["product_match"]["decision"] == "review"
+    with database.connect() as conn:
+        review = conn.execute("SELECT * FROM review_queue WHERE reason = 'low_confidence'").fetchone()
+    assert review is not None
+    assert review["confidence"] == pytest.approx(0.72)
+
+
+def test_match_evidence_is_returned_for_accepted_match(isolated_db, tmp_path, monkeypatch):
+    def fake_openai(*args, **kwargs):
+        return {
+            "result": "Known",
+            "product_match": {
+                "result": "Known",
+                "brand": "Arc'teryx",
+                "product_name": "Beta Jacket",
+                "confidence": 0.93,
+                "why": ["hooded shell", "front zipper"],
+            },
+            "product_structure": {
+                "garment_type": "jacket",
+                "zipper": "water resistant front zipper",
+                "hardware": "zip pull hardware",
+                "visible_evidence": ["front zipper", "zip pull hardware"],
+            },
+        }
+
+    monkeypatch.setattr(vision, "analyze_image_with_openai", fake_openai)
+    import_catalog_records(
+        [
+            {
+                "brand": "Arc'teryx",
+                "product_name": "Beta Jacket",
+                "category": "Jacket",
+                "official_logo": "https://example.com/logo.jpg",
+                "official_zipper": "https://example.com/zipper.jpg",
+            }
+        ]
+    )
+    image_path = tmp_path / "IMG_2468.png"
+    make_solid_image(image_path, (60, 80, 90))
+
+    result = classify_from_evidence("IMG_2468.png", str(image_path), "uploaded", asset_id="asset-evidence")
+    evidence = result["match_evidence"]
+
+    assert result["product_name"] == "Beta Jacket"
+    assert evidence["confidence"] == pytest.approx(0.93)
+    assert evidence["matched_because"]
+    assert evidence["matched_official_assets"]
+    assert "hardware:zip pull hardware" in evidence["matched_because"]
+    assert "evidence_asset_ids" in evidence
+
+
+def test_official_asset_import_supports_structure_reference_types(isolated_db):
+    import_catalog_records(
+        [
+            {
+                "brand": "Ralph Lauren",
+                "product_name": "Polo Shirt",
+                "category": "Shirt",
+                "colors": "Navy, White",
+                "official_logo": "https://example.com/logo.jpg",
+                "official_zipper": "https://example.com/zipper.jpg",
+                "official_hardware": "https://example.com/hardware.jpg",
+                "official_stitching": "https://example.com/stitching.jpg",
+            }
+        ]
+    )
+
+    asset_types = {item["asset_type"] for item in catalog.list_official_assets()}
+    assert {"official_logo", "official_zipper", "official_hardware", "official_stitching"}.issubset(asset_types)
+    with database.connect() as conn:
+        aliases = {row["alias"] for row in conn.execute("SELECT alias FROM product_aliases").fetchall()}
+    assert {"Polo Shirt", "Navy", "White"}.issubset(aliases)
+
+
+def test_exact_duplicate_enters_review_queue(isolated_db, tmp_path):
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
+    make_solid_image(first, (8, 8, 8))
+    second.write_bytes(first.read_bytes())
+
+    first_asset = assets.create_asset_record(
+        file_path=first,
+        original_name="IMG_A.png",
+        content_type="image/png",
+        size_bytes=first.stat().st_size,
+        batch_id="dup-batch",
+    )
+    second_asset = assets.create_asset_record(
+        file_path=second,
+        original_name="IMG_B.png",
+        content_type="image/png",
+        size_bytes=second.stat().st_size,
+        batch_id="dup-batch",
+    )
+
+    assert second_asset["id"] == first_asset["id"]
+    with database.connect() as conn:
+        review = conn.execute("SELECT * FROM review_queue WHERE reason = 'duplicate'").fetchone()
+    assert review is not None
+    assert review["item_id"] == first_asset["id"]
+
+
+def test_architecture_decisions_doc_locks_phase1_rules():
+    text = Path("ARCHITECTURE_DECISIONS.md").read_text(encoding="utf-8")
+    for phrase in (
+        "Unknown First",
+        "Official Truth Lock",
+        "Official Truth > Reality Truth > Community Truth",
+        "Phase 1 禁止生成",
+        "Vision 不能创造不存在的产品",
+        "Brand Agnostic",
+    ):
+        assert phrase in text
 
 
 def make_solid_image(path: Path, color: tuple[int, int, int]) -> None:
