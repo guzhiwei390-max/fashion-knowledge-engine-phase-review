@@ -1,6 +1,6 @@
 # Current Version
 
-当前版本号：Phase 1 Hardening Review v0.4
+当前版本号：Phase 1 Reserved Extension Architecture v0.5
 
 当前 Commit Hash：pending until commit; see final response for exact hash
 
@@ -20,6 +20,7 @@
 - Official product alias, family, variant, color alias storage
 - Expanded Official Product Assets for logo, zipper, hardware, stitching
 - Architecture decision log
+- Reserved database/API architecture for Success Library, Negative Library, Commercial Score, Trend Timeline, Region Layer, and Learning Feedback Loop
 - Regression tests for Unknown-first, confidence routing, evidence output, review queue, duplicate handling, and architecture rules
 
 ---
@@ -28,7 +29,12 @@
 
 新增表：
 
-- No new primary domain table in this iteration
+- success_library_items
+- negative_library_items
+- commercial_score_records
+- trend_timeline_events
+- region_layers
+- learning_feedback_events
 
 修改表：
 
@@ -37,6 +43,7 @@
 - official_products: official_fields_json now captures official catalog identity fields during import
 - product_aliases: now populated during official catalog import for product names, aliases, and colors
 - official_product_assets: now supports official_logo, official_zipper, official_hardware, official_stitching
+- source_type_registry: added reserved_extension source type
 
 ---
 
@@ -46,6 +53,7 @@
 
 - GET /api/review-queue
 - POST /api/review-queue/{review_id}/resolve
+- GET /api/extensions/reserved
 
 修改接口：
 
@@ -54,6 +62,7 @@
 - POST /api/jobs/process: now auto-enqueues Unknown and Low Confidence observations for human review
 - POST /api/catalog/import: now records product family, variant, aliases, color aliases, and expanded official asset types
 - GET /: admin UI now shows pending Human Review Queue
+- GET /api/pipelines/design: now includes reserved-only future module architecture
 
 ---
 
@@ -69,6 +78,8 @@
 - Product Structure Engine is brand agnostic and covers collar, zipper, logo_position, stitching, back_structure, sleeve_structure, hem_shape, fit_shape, pocket, hardware, material_behavior.
 - OpenAI Vision remains a secondary verification/detail source and cannot create products outside Official Catalog.
 - Architecture rules are now recorded in ARCHITECTURE_DECISIONS.md.
+- Success Library, Negative Library, Commercial Score, Trend Timeline, Region Layer, and Learning Feedback Loop are reserved-only extension points.
+- Reserved future modules have database structure and API design entries, but no Phase 1 logic, pages, scoring, trend analysis, region algorithms, or feedback automation.
 
 ---
 
@@ -87,7 +98,8 @@
 - Generate Product DNA with brand-agnostic structure evidence.
 - Generate Garment Validation Rules from evidence-backed Product DNA.
 - Retrieve Product DNA, Material DNA, contextual DNA placeholders, and Knowledge Card.
-- Run automated tests: 28 passing.
+- Inspect reserved future extension architecture through GET /api/extensions/reserved.
+- Run automated tests: 29 passing.
 
 ---
 
@@ -102,6 +114,7 @@
 - Human review resolution records decisions, but richer correction forms and active learning UI are still minimal.
 - Official visual references do not imply commercial usage rights; they are identification references only.
 - Community Truth ingestion remains reserved, not active.
+- Success Library, Negative Library, Commercial Score, Trend Timeline, Region Layer, and Learning Feedback Loop are schema/API reservations only and intentionally inactive.
 
 ---
 
@@ -114,6 +127,7 @@
 - Add richer Official Catalog category-page extraction for common structured product-list patterns.
 - Add stronger near-duplicate clustering for large batches.
 - Add product variant and color confidence evidence in Product DNA.
+- Keep future growth modules inactive until product recognition quality is stable.
 
 ---
 
@@ -128,3 +142,4 @@
 - Official Truth Lock 是否没有被 Reality Truth 或 Community Truth 覆盖。
 - Product Structure Engine 是否品牌无关，而不是围绕 Define 特化。
 - Phase 1 是否没有引入 AI 生图、换装、模特、场景生成、扩图或内容生成。
+- Success Library、Negative Library、Commercial Score、Trend Timeline、Region Layer、Learning Feedback Loop 是否只做了预留，没有提前实现逻辑、页面或算法。

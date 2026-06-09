@@ -286,6 +286,100 @@ def init_db() -> None:
                 evidence_ref_id TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS success_library_items (
+                id TEXT PRIMARY KEY,
+                subject_key TEXT NOT NULL,
+                product_id TEXT REFERENCES official_products(id),
+                source_type TEXT NOT NULL,
+                pipeline_type TEXT NOT NULL,
+                truth_layer TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'reserved',
+                evidence_ref_ids TEXT NOT NULL DEFAULT '[]',
+                criteria_json TEXT NOT NULL DEFAULT '{}',
+                reserved_metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS negative_library_items (
+                id TEXT PRIMARY KEY,
+                subject_key TEXT NOT NULL,
+                product_id TEXT REFERENCES official_products(id),
+                source_type TEXT NOT NULL,
+                pipeline_type TEXT NOT NULL,
+                truth_layer TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'reserved',
+                evidence_ref_ids TEXT NOT NULL DEFAULT '[]',
+                criteria_json TEXT NOT NULL DEFAULT '{}',
+                reserved_metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS commercial_score_records (
+                id TEXT PRIMARY KEY,
+                subject_key TEXT NOT NULL,
+                product_id TEXT REFERENCES official_products(id),
+                source_type TEXT NOT NULL,
+                pipeline_type TEXT NOT NULL,
+                truth_layer TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'reserved',
+                score_json TEXT NOT NULL DEFAULT '{}',
+                evidence_ref_ids TEXT NOT NULL DEFAULT '[]',
+                reserved_metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS trend_timeline_events (
+                id TEXT PRIMARY KEY,
+                subject_key TEXT NOT NULL,
+                product_id TEXT REFERENCES official_products(id),
+                source_type TEXT NOT NULL,
+                pipeline_type TEXT NOT NULL,
+                truth_layer TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'reserved',
+                event_time TEXT,
+                event_type TEXT NOT NULL DEFAULT 'reserved',
+                signal_json TEXT NOT NULL DEFAULT '{}',
+                evidence_ref_ids TEXT NOT NULL DEFAULT '[]',
+                reserved_metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS region_layers (
+                id TEXT PRIMARY KEY,
+                region_key TEXT NOT NULL,
+                subject_key TEXT NOT NULL DEFAULT 'Unknown',
+                product_id TEXT REFERENCES official_products(id),
+                source_type TEXT NOT NULL,
+                pipeline_type TEXT NOT NULL,
+                truth_layer TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'reserved',
+                locale_json TEXT NOT NULL DEFAULT '{}',
+                evidence_ref_ids TEXT NOT NULL DEFAULT '[]',
+                reserved_metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS learning_feedback_events (
+                id TEXT PRIMARY KEY,
+                target_type TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                feedback_type TEXT NOT NULL DEFAULT 'reserved',
+                source_type TEXT NOT NULL,
+                pipeline_type TEXT NOT NULL,
+                truth_layer TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'reserved',
+                feedback_json TEXT NOT NULL DEFAULT '{}',
+                applied_to_model INTEGER NOT NULL DEFAULT 0,
+                reserved_metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
         ensure_column(conn, "assets", "knowledge_layer", "TEXT NOT NULL DEFAULT 'user_reality'")
@@ -324,7 +418,24 @@ def init_db() -> None:
         ensure_column(conn, "review_queue", "resolution_json", "TEXT NOT NULL DEFAULT '{}'")
         ensure_column(conn, "review_queue", "resolved_by", "TEXT")
         ensure_column(conn, "review_queue", "resolved_at", "TEXT")
+        ensure_reserved_extension_columns(conn)
         seed_source_type_registry(conn)
+
+
+def ensure_reserved_extension_columns(conn: sqlite3.Connection) -> None:
+    for table in (
+        "success_library_items",
+        "negative_library_items",
+        "commercial_score_records",
+        "trend_timeline_events",
+        "region_layers",
+        "learning_feedback_events",
+    ):
+        ensure_column(conn, table, "source_type", "TEXT NOT NULL DEFAULT 'reserved_extension'")
+        ensure_column(conn, table, "pipeline_type", "TEXT NOT NULL DEFAULT 'reserved_future'")
+        ensure_column(conn, table, "truth_layer", "TEXT NOT NULL DEFAULT 'community_truth'")
+        ensure_column(conn, table, "status", "TEXT NOT NULL DEFAULT 'reserved'")
+        ensure_column(conn, table, "reserved_metadata_json", "TEXT NOT NULL DEFAULT '{}'")
 
 
 def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:

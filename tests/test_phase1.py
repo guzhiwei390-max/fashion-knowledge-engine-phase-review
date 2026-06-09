@@ -20,13 +20,13 @@ from app.catalog import (
 from app.confidence import HIGH_CONFIDENCE_THRESHOLD, REVIEW_CONFIDENCE_THRESHOLD, evaluate_match_confidence
 from app.database import init_db
 from app.knowledge import build_knowledge, search_knowledge
-from app.pipelines import PIPELINE_EXTERNAL_KNOWLEDGE, PIPELINE_INTERNAL_UPLOAD, TRUTH_OFFICIAL, TRUTH_REALITY, pipeline_design
+from app.pipelines import PIPELINE_EXTERNAL_KNOWLEDGE, PIPELINE_INTERNAL_UPLOAD, PIPELINE_RESERVED_FUTURE, TRUTH_OFFICIAL, TRUTH_REALITY, pipeline_design
 from app.structure import STRUCTURE_EVIDENCE_FIELDS
 from app.vision import classify_from_evidence, process_pending_jobs
 import app.vision as vision
 from app.visual import image_signature
 from app.openai_vision import parse_openai_response
-from app.main import source_types as source_types_endpoint, pipelines_design
+from app.main import reserved_extensions, source_types as source_types_endpoint, pipelines_design
 
 
 @pytest.fixture()
@@ -76,6 +76,34 @@ def test_pipeline_schema_is_reserved_without_enabling_external_ingestion(isolate
     assert source_types["external_knowledge_url"]["pipeline_type"] == PIPELINE_EXTERNAL_KNOWLEDGE
     assert source_types["official_catalog_import"]["truth_layer"] == TRUTH_OFFICIAL
     assert pipeline_design()["rule"] == "Official Truth can be supplemented but not overwritten by Reality Truth or Community Truth."
+
+
+def test_future_growth_modules_are_schema_and_api_reserved_only(isolated_db):
+    expected_tables = {
+        "success_library_items",
+        "negative_library_items",
+        "commercial_score_records",
+        "trend_timeline_events",
+        "region_layers",
+        "learning_feedback_events",
+    }
+    with database.connect() as conn:
+        tables = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        }
+        for table in expected_tables:
+            columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            assert {"source_type", "pipeline_type", "truth_layer", "status", "reserved_metadata_json"}.issubset(columns)
+
+    design = pipeline_design()
+    extensions = reserved_extensions()
+
+    assert expected_tables.issubset(tables)
+    assert design["pipelines"][PIPELINE_RESERVED_FUTURE]["may_override"] == []
+    assert all(item["status"] == "reserved_only" for item in extensions["modules"].values())
+    assert all(item["no_phase1_logic"] is True for item in extensions["modules"].values())
+    assert "POST /api/future/commercial-score" in design["api_design"]["reserved_future_endpoints"][PIPELINE_RESERVED_FUTURE]
 
 
 def test_knowledge_tables_have_truth_pipeline_markers(isolated_db):

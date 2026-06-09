@@ -22,7 +22,7 @@ from .catalog import (
 from .config import DATA_DIR, UPLOAD_DIR
 from .database import connect, decode_json, init_db
 from .knowledge import build_knowledge, list_knowledge_cards, search_knowledge
-from .pipelines import pipeline_design
+from .pipelines import RESERVED_EXTENSION_MODULES, pipeline_design
 from .review import list_review_items, resolve_review_item
 from .unknown import unknown_response
 from .vision import latest_observations, process_pending_jobs
@@ -53,6 +53,24 @@ def health() -> dict:
 @app.get("/api/pipelines/design")
 def pipelines_design() -> dict:
     return pipeline_design()
+
+
+@app.get("/api/extensions/reserved")
+def reserved_extensions() -> dict:
+    return {
+        "status": "reserved_only",
+        "phase1_rule": "No Success Library, Negative Library, Commercial Score, Trend Timeline, Region Layer, or Learning Feedback Loop logic is active in Phase 1.",
+        "current_priority": [
+            "Official Catalog",
+            "Official Assets",
+            "Product DNA",
+            "Product Structure",
+            "Confidence",
+            "Evidence",
+            "Review Queue",
+        ],
+        "modules": RESERVED_EXTENSION_MODULES,
+    }
 
 
 @app.get("/api/source-types")

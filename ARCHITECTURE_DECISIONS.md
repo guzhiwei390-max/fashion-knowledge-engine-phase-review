@@ -68,3 +68,21 @@ A valid product decision must be routed through the central Confidence Engine an
 Unknown, low confidence, conflict, duplicate, and near duplicate items must enter Human Review Queue.
 
 Human correction may add Reality Truth evidence and improve future recognition, but it must not overwrite Official Truth.
+
+## Reserved Future Modules
+
+Success Library, Negative Library, Commercial Score, Trend Timeline, Region Layer, and Learning Feedback Loop are reserved-only in Phase 1.
+
+Phase 1 may reserve database tables, source types, API design entries, and architecture extension points for these modules, but it must not implement their logic, pages, scoring, timeline analysis, region algorithms, or automated learning feedback.
+
+Current priority remains:
+
+- Official Catalog
+- Official Assets
+- Product DNA
+- Product Structure
+- Confidence
+- Evidence
+- Review Queue
+
+The system must recognize products first, then later learn how people wear them, and only after that study commercial or trend behavior.

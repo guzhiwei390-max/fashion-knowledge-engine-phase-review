@@ -4,6 +4,7 @@ from typing import Any
 PIPELINE_INTERNAL_UPLOAD = "internal_upload"
 PIPELINE_EXTERNAL_KNOWLEDGE = "external_knowledge"
 PIPELINE_OFFICIAL_CATALOG = "official_catalog"
+PIPELINE_RESERVED_FUTURE = "reserved_future"
 
 TRUTH_OFFICIAL = "official_truth"
 TRUTH_REALITY = "reality_truth"
@@ -51,6 +52,51 @@ SOURCE_TYPES: dict[str, dict[str, Any]] = {
         "truth_layer": TRUTH_COMMUNITY,
         "description": "Reserved for future manually supplied external knowledge.",
     },
+    "reserved_extension": {
+        "pipeline_type": PIPELINE_RESERVED_FUTURE,
+        "truth_layer": TRUTH_COMMUNITY,
+        "description": "Reserved-only source type for future Success Library, Negative Library, Commercial Score, Trend Timeline, Region Layer, and Learning Feedback Loop.",
+    },
+}
+
+
+RESERVED_EXTENSION_MODULES: dict[str, dict[str, Any]] = {
+    "success_library": {
+        "table": "success_library_items",
+        "status": "reserved_only",
+        "purpose": "Future storage for proven successful product/community examples after product identity is reliable.",
+        "no_phase1_logic": True,
+    },
+    "negative_library": {
+        "table": "negative_library_items",
+        "status": "reserved_only",
+        "purpose": "Future storage for failed or disallowed examples without contaminating Product DNA.",
+        "no_phase1_logic": True,
+    },
+    "commercial_score": {
+        "table": "commercial_score_records",
+        "status": "reserved_only",
+        "purpose": "Future scoring records for commercial potential after evidence and trend systems exist.",
+        "no_phase1_logic": True,
+    },
+    "trend_timeline": {
+        "table": "trend_timeline_events",
+        "status": "reserved_only",
+        "purpose": "Future time-series trend evidence separated from product identity truth.",
+        "no_phase1_logic": True,
+    },
+    "region_layer": {
+        "table": "region_layers",
+        "status": "reserved_only",
+        "purpose": "Future region/localization layer for market-specific evidence.",
+        "no_phase1_logic": True,
+    },
+    "learning_feedback_loop": {
+        "table": "learning_feedback_events",
+        "status": "reserved_only",
+        "purpose": "Future feedback events from human review and model improvement without direct Phase 1 automation.",
+        "no_phase1_logic": True,
+    },
 }
 
 
@@ -80,6 +126,15 @@ RESERVED_API_DESIGN: dict[str, Any] = {
             "POST /api/official/catalog/import",
             "GET /api/official/truth/search",
         ],
+        PIPELINE_RESERVED_FUTURE: [
+            "GET /api/extensions/reserved",
+            "POST /api/future/success-library",
+            "POST /api/future/negative-library",
+            "POST /api/future/commercial-score",
+            "POST /api/future/trend-timeline",
+            "POST /api/future/region-layer",
+            "POST /api/future/learning-feedback",
+        ],
     },
     "status": "reserved_only",
 }
@@ -106,9 +161,23 @@ def pipeline_design() -> dict[str, Any]:
                 "truth_layer": TRUTH_COMMUNITY,
                 "may_override": [],
             },
+            PIPELINE_RESERVED_FUTURE: {
+                "purpose": "Reserved-only extension slots. No Phase 1 logic, UI, scoring, trend, region, or feedback automation is enabled.",
+                "writes": [
+                    "success_library_items",
+                    "negative_library_items",
+                    "commercial_score_records",
+                    "trend_timeline_events",
+                    "region_layers",
+                    "learning_feedback_events",
+                ],
+                "truth_layer": TRUTH_COMMUNITY,
+                "may_override": [],
+            },
         },
         "truth_priority": TRUTH_PRIORITY,
         "source_types": SOURCE_TYPES,
+        "reserved_extension_modules": RESERVED_EXTENSION_MODULES,
         "api_design": RESERVED_API_DESIGN,
         "rule": "Official Truth can be supplemented but not overwritten by Reality Truth or Community Truth.",
     }
