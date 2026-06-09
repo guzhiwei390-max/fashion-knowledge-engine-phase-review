@@ -58,6 +58,13 @@ def init_db() -> None:
                 source_id TEXT,
                 external_ref_uri TEXT,
                 ingestion_metadata TEXT NOT NULL DEFAULT '{}',
+                ingestion_status TEXT NOT NULL DEFAULT 'ingested',
+                asset_type TEXT NOT NULL DEFAULT 'unknown',
+                quality_status TEXT NOT NULL DEFAULT 'unknown',
+                width INTEGER,
+                height INTEGER,
+                exif_json TEXT NOT NULL DEFAULT '{}',
+                thumbnail_uri TEXT,
                 visual_signature TEXT NOT NULL DEFAULT '{}',
                 duplicate_of_asset_id TEXT,
                 duplicate_status TEXT NOT NULL DEFAULT 'unique',
@@ -98,6 +105,28 @@ def init_db() -> None:
                 processed_items INTEGER NOT NULL DEFAULT 0,
                 unknown_items INTEGER NOT NULL DEFAULT 0,
                 failed_items INTEGER NOT NULL DEFAULT 0,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS asset_batches (
+                id TEXT PRIMARY KEY,
+                pipeline_type TEXT NOT NULL DEFAULT 'internal_upload',
+                truth_layer TEXT NOT NULL DEFAULT 'reality_truth',
+                status TEXT NOT NULL DEFAULT 'queued',
+                total_files INTEGER NOT NULL DEFAULT 0,
+                ingested INTEGER NOT NULL DEFAULT 0,
+                duplicated INTEGER NOT NULL DEFAULT 0,
+                corrupted INTEGER NOT NULL DEFAULT 0,
+                low_quality INTEGER NOT NULL DEFAULT 0,
+                coarse_classified INTEGER NOT NULL DEFAULT 0,
+                matched INTEGER NOT NULL DEFAULT 0,
+                unknown INTEGER NOT NULL DEFAULT 0,
+                review_needed INTEGER NOT NULL DEFAULT 0,
+                failed INTEGER NOT NULL DEFAULT 0,
+                openai_vision_calls_used INTEGER NOT NULL DEFAULT 0,
+                estimated_cost REAL NOT NULL DEFAULT 0,
                 metadata_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -196,6 +225,20 @@ def init_db() -> None:
                 resolution_json TEXT NOT NULL DEFAULT '{}',
                 resolved_by TEXT,
                 resolved_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS asset_product_regions (
+                id TEXT PRIMARY KEY,
+                asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+                region_index INTEGER NOT NULL DEFAULT 0,
+                crop_uri TEXT,
+                bbox_json TEXT NOT NULL DEFAULT '{}',
+                candidate_product_ids TEXT NOT NULL DEFAULT '[]',
+                confidence REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'reserved',
+                evidence_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -380,6 +423,121 @@ def init_db() -> None:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS material_reality_patterns (
+                id TEXT PRIMARY KEY,
+                subject_key TEXT NOT NULL,
+                product_id TEXT REFERENCES official_products(id),
+                source_type TEXT NOT NULL DEFAULT 'internal_upload_image',
+                pipeline_type TEXT NOT NULL DEFAULT 'internal_upload',
+                truth_layer TEXT NOT NULL DEFAULT 'reality_truth',
+                status TEXT NOT NULL DEFAULT 'reserved',
+                pattern_json TEXT NOT NULL DEFAULT '{}',
+                evidence_asset_ids TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS human_reality_patterns (
+                id TEXT PRIMARY KEY,
+                subject_key TEXT NOT NULL DEFAULT 'Unknown',
+                source_type TEXT NOT NULL DEFAULT 'internal_upload_image',
+                pipeline_type TEXT NOT NULL DEFAULT 'internal_upload',
+                truth_layer TEXT NOT NULL DEFAULT 'reality_truth',
+                status TEXT NOT NULL DEFAULT 'reserved',
+                pattern_json TEXT NOT NULL DEFAULT '{}',
+                evidence_asset_ids TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS scene_reality_patterns (
+                id TEXT PRIMARY KEY,
+                scene_key TEXT NOT NULL DEFAULT 'Unknown',
+                source_type TEXT NOT NULL DEFAULT 'internal_upload_image',
+                pipeline_type TEXT NOT NULL DEFAULT 'internal_upload',
+                truth_layer TEXT NOT NULL DEFAULT 'reality_truth',
+                status TEXT NOT NULL DEFAULT 'reserved',
+                pattern_json TEXT NOT NULL DEFAULT '{}',
+                evidence_asset_ids TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS moment_patterns (
+                id TEXT PRIMARY KEY,
+                moment_key TEXT NOT NULL DEFAULT 'Unknown',
+                scene_key TEXT NOT NULL DEFAULT 'Unknown',
+                source_type TEXT NOT NULL DEFAULT 'internal_upload_image',
+                pipeline_type TEXT NOT NULL DEFAULT 'internal_upload',
+                truth_layer TEXT NOT NULL DEFAULT 'reality_truth',
+                status TEXT NOT NULL DEFAULT 'reserved',
+                pattern_json TEXT NOT NULL DEFAULT '{}',
+                evidence_asset_ids TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS outfit_reality_patterns (
+                id TEXT PRIMARY KEY,
+                subject_key TEXT NOT NULL DEFAULT 'Unknown',
+                source_type TEXT NOT NULL DEFAULT 'internal_upload_image',
+                pipeline_type TEXT NOT NULL DEFAULT 'internal_upload',
+                truth_layer TEXT NOT NULL DEFAULT 'reality_truth',
+                status TEXT NOT NULL DEFAULT 'reserved',
+                pattern_json TEXT NOT NULL DEFAULT '{}',
+                evidence_asset_ids TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS reality_score_schema (
+                id TEXT PRIMARY KEY,
+                schema_name TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL DEFAULT 'reserved',
+                schema_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS video_assets (
+                id TEXT PRIMARY KEY,
+                file_uri TEXT NOT NULL,
+                original_name TEXT NOT NULL,
+                sha256 TEXT NOT NULL UNIQUE,
+                content_type TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                source_type TEXT NOT NULL DEFAULT 'uploaded_video',
+                pipeline_type TEXT NOT NULL DEFAULT 'internal_upload',
+                truth_layer TEXT NOT NULL DEFAULT 'reality_truth',
+                status TEXT NOT NULL DEFAULT 'reserved',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS video_frame_assets (
+                id TEXT PRIMARY KEY,
+                video_asset_id TEXT REFERENCES video_assets(id) ON DELETE CASCADE,
+                asset_id TEXT REFERENCES assets(id) ON DELETE SET NULL,
+                frame_time_ms INTEGER NOT NULL DEFAULT 0,
+                frame_index INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'reserved',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS frame_extraction_jobs (
+                id TEXT PRIMARY KEY,
+                video_asset_id TEXT REFERENCES video_assets(id) ON DELETE CASCADE,
+                status TEXT NOT NULL DEFAULT 'reserved',
+                requested_frame_rate REAL,
+                extracted_frames INTEGER NOT NULL DEFAULT 0,
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
         ensure_column(conn, "assets", "knowledge_layer", "TEXT NOT NULL DEFAULT 'user_reality'")
@@ -388,6 +546,13 @@ def init_db() -> None:
         ensure_column(conn, "assets", "source_id", "TEXT")
         ensure_column(conn, "assets", "external_ref_uri", "TEXT")
         ensure_column(conn, "assets", "ingestion_metadata", "TEXT NOT NULL DEFAULT '{}'")
+        ensure_column(conn, "assets", "ingestion_status", "TEXT NOT NULL DEFAULT 'ingested'")
+        ensure_column(conn, "assets", "asset_type", "TEXT NOT NULL DEFAULT 'unknown'")
+        ensure_column(conn, "assets", "quality_status", "TEXT NOT NULL DEFAULT 'unknown'")
+        ensure_column(conn, "assets", "width", "INTEGER")
+        ensure_column(conn, "assets", "height", "INTEGER")
+        ensure_column(conn, "assets", "exif_json", "TEXT NOT NULL DEFAULT '{}'")
+        ensure_column(conn, "assets", "thumbnail_uri", "TEXT")
         ensure_column(conn, "assets", "visual_signature", "TEXT NOT NULL DEFAULT '{}'")
         ensure_column(conn, "assets", "duplicate_of_asset_id", "TEXT")
         ensure_column(conn, "assets", "duplicate_status", "TEXT NOT NULL DEFAULT 'unique'")

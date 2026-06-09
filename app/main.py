@@ -8,7 +8,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from .assets import import_zip_file, save_upload_file
+from .assets import batch_progress, import_zip_file, save_upload_file
 from .catalog import (
     add_official_visual_reference,
     import_catalog_file,
@@ -200,26 +200,63 @@ def list_jobs() -> dict:
 
 @app.get("/api/batches")
 def list_batches() -> dict:
+    return {"batches": batch_progress()}
+
+
+@app.get("/api/batches/{batch_id}")
+def get_batch(batch_id: str) -> dict:
+    rows = batch_progress(batch_id)
+    if not rows:
+        return unknown_response("batch_id")
+    return {"batch": rows[0]}
+
+
+@app.post("/api/batches/{batch_id}/retry")
+def retry_batch(batch_id: str) -> dict:
     with connect() as conn:
-        rows = conn.execute(
+        conn.execute(
             """
-            SELECT
-                assets.upload_batch_id AS batch_id,
-                COUNT(assets.id) AS total,
-                SUM(CASE WHEN analysis_jobs.status = 'completed' THEN 1 ELSE 0 END) AS processed,
-                SUM(CASE WHEN analysis_jobs.status = 'failed' THEN 1 ELSE 0 END) AS failed,
-                SUM(CASE WHEN vision_observations.unknown_fields IS NOT NULL
-                          AND vision_observations.unknown_fields != '[]' THEN 1 ELSE 0 END) AS unknown,
-                SUM(CASE WHEN vision_observations.structured_output LIKE '%"product_name": "Unknown"%'
-                          OR vision_observations.structured_output IS NULL THEN 0 ELSE 1 END) AS matched
-            FROM assets
-            LEFT JOIN analysis_jobs ON analysis_jobs.asset_id = assets.id
-            LEFT JOIN vision_observations ON vision_observations.asset_id = assets.id
-            GROUP BY assets.upload_batch_id
-            ORDER BY MAX(assets.created_at) DESC
+            UPDATE analysis_jobs
+            SET status = 'queued', error_message = NULL
+            WHERE asset_id IN (SELECT id FROM assets WHERE upload_batch_id = ?)
+              AND status IN ('failed', 'paused')
+            """,
+            (batch_id,),
+        )
+        conn.execute("UPDATE asset_batches SET status = 'queued', updated_at = datetime('now') WHERE id = ?", (batch_id,))
+    return {"status": "queued", "batch_id": batch_id}
+
+
+@app.post("/api/batches/{batch_id}/pause")
+def pause_batch(batch_id: str) -> dict:
+    with connect() as conn:
+        conn.execute(
             """
-        ).fetchall()
-    return {"batches": [dict(row) for row in rows]}
+            UPDATE analysis_jobs
+            SET status = 'paused'
+            WHERE asset_id IN (SELECT id FROM assets WHERE upload_batch_id = ?)
+              AND status IN ('queued', 'pending', 'failed')
+            """,
+            (batch_id,),
+        )
+        conn.execute("UPDATE asset_batches SET status = 'paused', updated_at = datetime('now') WHERE id = ?", (batch_id,))
+    return {"status": "paused", "batch_id": batch_id}
+
+
+@app.post("/api/batches/{batch_id}/resume")
+def resume_batch(batch_id: str) -> dict:
+    with connect() as conn:
+        conn.execute(
+            """
+            UPDATE analysis_jobs
+            SET status = 'queued'
+            WHERE asset_id IN (SELECT id FROM assets WHERE upload_batch_id = ?)
+              AND status = 'paused'
+            """,
+            (batch_id,),
+        )
+        conn.execute("UPDATE asset_batches SET status = 'queued', updated_at = datetime('now') WHERE id = ?", (batch_id,))
+    return {"status": "queued", "batch_id": batch_id}
 
 
 @app.get("/api/observations")
@@ -566,7 +603,7 @@ ADMIN_HTML = """
       document.querySelector("#visualReferences").innerHTML = rows.map(r => item(`<strong>${esc(r.brand)} / ${esc(r.product_name)}</strong><div class="meta">${esc(r.asset_type)}<br>signature: ${r.visual_signature && r.visual_signature.result !== "Unknown" ? "ready" : "missing"}<br>structure: ${Object.keys(r.structure_json || {}).length ? "ready" : "pending"}</div>`)).join("") || "<div class='meta'>No visual reference library entries</div>";
     }
     function renderBatches(rows) {
-      document.querySelector("#batches").innerHTML = rows.map(b => item(`<strong>${esc(b.batch_id)}</strong><div class="meta">total ${b.total} / processed ${b.processed || 0} / matched ${b.matched || 0} / unknown ${b.unknown || 0} / failed ${b.failed || 0}</div>`)).join("") || "<div class='meta'>No batches</div>";
+      document.querySelector("#batches").innerHTML = rows.map(b => item(`<strong>${esc(b.id)}</strong><div class="meta">status ${esc(b.status)}<br>total ${b.total_files || 0} / ingested ${b.ingested || 0} / duplicated ${b.duplicated || 0} / corrupted ${b.corrupted || 0} / low quality ${b.low_quality || 0}<br>coarse ${b.coarse_classified || 0} / matched ${b.matched || 0} / unknown ${b.unknown || 0} / review ${b.review_needed || 0} / failed ${b.failed || 0}<br>vision calls ${b.openai_vision_calls_used || 0} / est. cost ${b.estimated_cost || 0}</div>`)).join("") || "<div class='meta'>No batches</div>";
     }
     function renderReviewQueue(rows) {
       document.querySelector("#reviewQueue").innerHTML = rows.map(r => item(`<strong>${esc(r.reason)}</strong><div class="meta">${esc(r.item_type)} / ${esc(r.item_id)}<br>confidence: ${esc(r.confidence)}<br>${esc(JSON.stringify(r.review_payload || {}))}</div>`)).join("") || "<div class='meta'>No pending review items</div>";

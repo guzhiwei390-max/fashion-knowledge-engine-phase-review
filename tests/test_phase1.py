@@ -106,6 +106,31 @@ def test_future_growth_modules_are_schema_and_api_reserved_only(isolated_db):
     assert "POST /api/future/commercial-score" in design["api_design"]["reserved_future_endpoints"][PIPELINE_RESERVED_FUTURE]
 
 
+def test_reality_moment_and_video_structures_are_reserved(isolated_db):
+    expected_tables = {
+        "material_reality_patterns",
+        "human_reality_patterns",
+        "scene_reality_patterns",
+        "moment_patterns",
+        "outfit_reality_patterns",
+        "reality_score_schema",
+        "video_assets",
+        "video_frame_assets",
+        "frame_extraction_jobs",
+        "asset_product_regions",
+        "asset_batches",
+    }
+    with database.connect() as conn:
+        tables = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        }
+    assert expected_tables.issubset(tables)
+    design = pipeline_design()
+    assert "video_assets" in design["pipelines"][PIPELINE_RESERVED_FUTURE]["writes"]
+    assert "material_reality_patterns" in design["pipelines"][PIPELINE_RESERVED_FUTURE]["writes"]
+
+
 def test_knowledge_tables_have_truth_pipeline_markers(isolated_db):
     with database.connect() as conn:
         dna_columns = {row["name"] for row in conn.execute("PRAGMA table_info(dna_records)").fetchall()}
@@ -140,6 +165,69 @@ def test_internal_upload_assets_have_reserved_pipeline_fields(isolated_db, tmp_p
 
     assert asset["pipeline_type"] == PIPELINE_INTERNAL_UPLOAD
     assert asset["truth_layer"] == TRUTH_REALITY
+
+
+def test_user_upload_filename_cannot_create_official_truth(isolated_db, tmp_path):
+    image_path = tmp_path / "official_white_bg_lululemon.png"
+    Image.new("RGB", (512, 512), (12, 12, 12)).save(image_path)
+
+    asset = assets.create_asset_record(
+        file_path=image_path,
+        original_name="official_white_bg_lululemon.png",
+        content_type="image/png",
+        size_bytes=image_path.stat().st_size,
+        batch_id="truth-clean-batch",
+    )
+
+    assert asset["source_type"] == "uploaded"
+    assert asset["truth_layer"] == TRUTH_REALITY
+    assert asset["asset_type"] == "reality_product_photo"
+
+
+def test_corrupted_image_is_stored_without_blocking_batch(isolated_db, tmp_path):
+    bad_image = tmp_path / "broken.png"
+    bad_image.write_bytes(b"not a real png")
+
+    asset = assets.create_asset_record(
+        file_path=bad_image,
+        original_name="broken.png",
+        content_type="image/png",
+        size_bytes=bad_image.stat().st_size,
+        batch_id="corrupt-batch",
+    )
+
+    assert asset["ingestion_status"] == "corrupted"
+    assert asset["asset_type"] == "unknown"
+    with database.connect() as conn:
+        job_count = conn.execute("SELECT COUNT(*) AS count FROM analysis_jobs").fetchone()["count"]
+        review = conn.execute("SELECT * FROM review_queue WHERE item_id = ?", (asset["id"],)).fetchone()
+        batch = conn.execute("SELECT * FROM asset_batches WHERE id = 'corrupt-batch'").fetchone()
+    assert job_count == 0
+    assert review is not None
+    assert batch["corrupted"] == 1
+    assert batch["unknown"] == 1
+
+
+def test_multi_product_photo_creates_region_placeholder_and_review(isolated_db, tmp_path):
+    image_path = tmp_path / "desk_multi_product_batch.png"
+    Image.new("RGB", (512, 512), (80, 80, 80)).save(image_path)
+
+    asset = assets.create_asset_record(
+        file_path=image_path,
+        original_name="desk_multi_product_batch.png",
+        content_type="image/png",
+        size_bytes=image_path.stat().st_size,
+        batch_id="multi-batch",
+    )
+
+    assert asset["asset_type"] == "multi_product_photo"
+    with database.connect() as conn:
+        region = conn.execute("SELECT * FROM asset_product_regions WHERE asset_id = ?", (asset["id"],)).fetchone()
+        review = conn.execute("SELECT * FROM review_queue WHERE item_id = ?", (asset["id"],)).fetchone()
+        batch = conn.execute("SELECT * FROM asset_batches WHERE id = 'multi-batch'").fetchone()
+    assert region is not None
+    assert review is not None
+    assert batch["review_needed"] == 1
 
 
 def test_catalog_import_and_match_are_evidence_based(isolated_db):

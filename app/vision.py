@@ -7,6 +7,7 @@ from PIL import Image, UnidentifiedImageError
 
 from .catalog import list_catalog, match_official_product, match_official_product_by_visual_signature
 from .confidence import evaluate_match_confidence
+from .assets import refresh_batch_progress
 from .database import connect, decode_json, encode_json, utc_now
 from .evidence import build_match_evidence
 from .openai_vision import analyze_image_with_openai, empty_product_structure
@@ -278,10 +279,10 @@ def process_pending_jobs(limit: int = 5000) -> dict[str, Any]:
     with connect() as conn:
         jobs = conn.execute(
             """
-            SELECT analysis_jobs.*, assets.file_uri, assets.original_name, assets.source_type
+            SELECT analysis_jobs.*, assets.file_uri, assets.original_name, assets.source_type, assets.upload_batch_id
             FROM analysis_jobs
             JOIN assets ON assets.id = analysis_jobs.asset_id
-            WHERE analysis_jobs.status IN ('pending', 'failed')
+            WHERE analysis_jobs.status IN ('queued', 'pending', 'failed')
             ORDER BY analysis_jobs.created_at ASC
             LIMIT ?
             """,
@@ -350,12 +351,14 @@ def process_pending_jobs(limit: int = 5000) -> dict[str, Any]:
                     "UPDATE analysis_jobs SET status = 'completed', finished_at = ? WHERE id = ?",
                     (utc_now(), job["id"]),
                 )
+                refresh_batch_progress(conn, job["upload_batch_id"])
                 processed += 1
             except Exception as exc:  # Keeps the queue inspectable instead of hiding failures.
                 conn.execute(
                     "UPDATE analysis_jobs SET status = 'failed', finished_at = ?, error_message = ? WHERE id = ?",
                     (utc_now(), str(exc), job["id"]),
                 )
+                refresh_batch_progress(conn, job["upload_batch_id"])
                 failed += 1
     return {"processed": processed, "failed": failed}
 

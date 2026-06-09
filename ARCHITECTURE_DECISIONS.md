@@ -98,3 +98,17 @@ Current priority remains:
 - Review Queue
 
 The system must recognize products first, then later learn how people wear them, and only after that study commercial or trend behavior.
+
+## Production Batch Ingestion
+
+Phase 1 must handle real production material packages, including 10,000+ mixed images, without assuming clean filenames, clean folders, one product per image, clear images, or successful recognition for every item.
+
+Batch upload and zip import must preserve originals, create a batch_id, keep per-file status, and avoid failing an entire batch because one file is corrupted, duplicated, low quality, or unknown.
+
+Ordinary user uploads default to Reality Truth. A filename containing words such as "official" must not create Official Truth. Official Truth may only enter through Official Catalog or explicit official visual reference import paths.
+
+Local hashes, thumbnails, EXIF, dimensions, and coarse classification are ingestion infrastructure. They can prefilter and organize work, but they must not become final product identity.
+
+Multi-product photos must not be forced into a single product match. They require region/candidate structures and review when uncertain.
+
+OpenAI Vision must remain layered behind local ingestion, deduplication, coarse classification, and Official Catalog candidate narrowing.

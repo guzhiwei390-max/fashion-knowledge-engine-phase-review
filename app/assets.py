@@ -3,12 +3,14 @@ import shutil
 import uuid
 import zipfile
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 from fastapi import HTTPException, UploadFile
+from PIL import Image, UnidentifiedImageError
 
+from .classification import coarse_classify_asset
 from .config import ALLOWED_IMAGE_EXTENSIONS, MAX_UPLOAD_BYTES, UPLOAD_DIR
-from .database import connect, encode_json, utc_now
+from .database import connect, decode_json, encode_json, utc_now
 from .pipelines import PIPELINE_INTERNAL_UPLOAD, TRUTH_COMMUNITY, TRUTH_OFFICIAL, TRUTH_REALITY
 from .review import enqueue_review_item
 from .visual import image_signature, signature_similarity
@@ -22,21 +24,8 @@ def is_allowed_image(filename: str) -> bool:
 
 
 def source_type_from_name(filename: str) -> str:
-    normalized = filename.lower().replace("-", "_").replace(" ", "_")
-    markers = {
-        "official_white_bg": "official",
-        "official_model": "official",
-        "xiaohongshu": "social",
-        "instagram": "social",
-        "tiktok": "social",
-        "pinterest": "social",
-        "employee": "employee",
-        "buyer": "buyer",
-        "realuser": "real_user",
-    }
-    for marker, source in markers.items():
-        if marker in normalized:
-            return source
+    # Ordinary batch uploads are Reality Truth even if filenames contain "official".
+    # Official Truth can only enter through Official Catalog / Visual Reference import paths.
     return "uploaded"
 
 
@@ -94,7 +83,8 @@ def create_asset_record(
     batch_id: str,
 ) -> dict:
     asset_hash = sha256_file(file_path)
-    visual_signature = image_signature(str(file_path))
+    metadata = inspect_upload_image(file_path)
+    visual_signature = image_signature(str(file_path)) if metadata["ingestion_status"] != "corrupted" else {"result": "Unknown"}
     now = utc_now()
     asset_id = str(uuid.uuid4())
     final_path = _safe_asset_path(batch_id, asset_id, original_name)
@@ -111,6 +101,7 @@ def create_asset_record(
         ).fetchone()
         if duplicate:
             file_path.unlink(missing_ok=True)
+            ensure_batch_record(conn, batch_id)
             enqueue_review_item(
                 conn,
                 item_type="asset",
@@ -124,22 +115,39 @@ def create_asset_record(
                     "sha256": asset_hash,
                 },
             )
+            record_duplicate_attempt(conn, batch_id)
             return dict(duplicate)
 
         near_duplicate = find_near_duplicate(conn, visual_signature)
         duplicate_of_asset_id = near_duplicate["id"] if near_duplicate else None
         duplicate_status = "near_duplicate" if near_duplicate else "unique"
+        classification = coarse_classify_asset(
+            original_name=original_name,
+            source_type=source_type,
+            width=metadata.get("width"),
+            height=metadata.get("height"),
+            duplicate_status=duplicate_status,
+            corrupted=metadata["ingestion_status"] == "corrupted",
+        )
 
         shutil.move(str(file_path), final_path)
+        thumbnail_uri = create_thumbnail(final_path, batch_id, asset_id) if metadata["ingestion_status"] != "corrupted" else None
+        ingestion_metadata = {
+            "file_hash": asset_hash,
+            "perceptual_hash": visual_signature.get("ahash", "Unknown"),
+            "coarse_classification_signals": classification["signals"],
+            "original_saved": True,
+        }
         conn.execute(
             """
             INSERT INTO assets (
                 id, file_uri, original_name, sha256, content_type, size_bytes,
                 source_type, knowledge_layer, pipeline_type, truth_layer,
-                ingestion_metadata, visual_signature, duplicate_of_asset_id,
-                duplicate_status, upload_batch_id, created_at
+                ingestion_metadata, ingestion_status, asset_type, quality_status,
+                width, height, exif_json, thumbnail_uri, visual_signature,
+                duplicate_of_asset_id, duplicate_status, upload_batch_id, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 asset_id,
@@ -152,6 +160,14 @@ def create_asset_record(
                 knowledge_layer,
                 PIPELINE_INTERNAL_UPLOAD,
                 truth_layer,
+                encode_json(ingestion_metadata),
+                metadata["ingestion_status"],
+                classification["asset_type"],
+                classification["quality_status"],
+                metadata.get("width"),
+                metadata.get("height"),
+                encode_json(metadata.get("exif", {})),
+                thumbnail_uri,
                 encode_json(visual_signature),
                 duplicate_of_asset_id,
                 duplicate_status,
@@ -159,15 +175,37 @@ def create_asset_record(
                 now,
             ),
         )
-        conn.execute(
-            """
-            INSERT INTO analysis_jobs (
-                id, asset_id, status, model_name, attempts, created_at
+        ensure_batch_record(conn, batch_id)
+        if metadata["ingestion_status"] == "corrupted":
+            enqueue_review_item(
+                conn,
+                item_type="asset",
+                item_id=asset_id,
+                reason="unknown",
+                confidence=0.0,
+                payload={"ingestion_status": "corrupted", "original_name": original_name},
             )
-            VALUES (?, ?, 'pending', 'phase1-local-vision', 0, ?)
-            """,
-            (str(uuid.uuid4()), asset_id, now),
-        )
+        else:
+            job_status = "queued" if classification["asset_type"] == "multi_product_photo" else "pending"
+            conn.execute(
+                """
+                INSERT INTO analysis_jobs (
+                    id, asset_id, status, model_name, attempts, created_at
+                )
+                VALUES (?, ?, ?, 'phase1-local-vision', 0, ?)
+                """,
+                (str(uuid.uuid4()), asset_id, job_status, now),
+            )
+            if classification["asset_type"] == "multi_product_photo":
+                create_reserved_product_region(conn, asset_id)
+                enqueue_review_item(
+                    conn,
+                    item_type="asset",
+                    item_id=asset_id,
+                    reason="low_confidence",
+                    confidence=0.0,
+                    payload={"asset_type": "multi_product_photo", "message": "Multi-product photo requires product region review."},
+                )
         if near_duplicate:
             enqueue_review_item(
                 conn,
@@ -182,6 +220,7 @@ def create_asset_record(
                     "similarity": near_duplicate["score"],
                 },
             )
+        refresh_batch_progress(conn, batch_id)
 
     return {
         "id": asset_id,
@@ -194,12 +233,57 @@ def create_asset_record(
         "knowledge_layer": knowledge_layer,
         "pipeline_type": PIPELINE_INTERNAL_UPLOAD,
         "truth_layer": truth_layer,
+        "ingestion_status": metadata["ingestion_status"],
+        "asset_type": classification["asset_type"],
+        "quality_status": classification["quality_status"],
+        "width": metadata.get("width"),
+        "height": metadata.get("height"),
+        "thumbnail_uri": thumbnail_uri,
         "visual_signature": visual_signature,
         "duplicate_of_asset_id": duplicate_of_asset_id,
         "duplicate_status": duplicate_status,
         "upload_batch_id": batch_id,
         "created_at": now,
     }
+
+
+def inspect_upload_image(path: Path) -> dict[str, Any]:
+    try:
+        with Image.open(path) as image:
+            image.verify()
+        with Image.open(path) as image:
+            width, height = image.size
+            exif = {}
+            try:
+                exif = {str(key): str(value) for key, value in image.getexif().items()}
+            except (AttributeError, OSError, ValueError):
+                exif = {}
+            return {
+                "ingestion_status": "ingested",
+                "width": width,
+                "height": height,
+                "exif": exif,
+            }
+    except (UnidentifiedImageError, OSError, ValueError):
+        return {
+            "ingestion_status": "corrupted",
+            "width": None,
+            "height": None,
+            "exif": {},
+        }
+
+
+def create_thumbnail(path: Path, batch_id: str, asset_id: str) -> str | None:
+    try:
+        thumb_path = UPLOAD_DIR / batch_id / "thumbs" / f"{asset_id}.jpg"
+        thumb_path.parent.mkdir(parents=True, exist_ok=True)
+        with Image.open(path) as image:
+            thumb = image.convert("RGB")
+            thumb.thumbnail((320, 320))
+            thumb.save(thumb_path, "JPEG", quality=82)
+        return str(thumb_path)
+    except (UnidentifiedImageError, OSError, ValueError):
+        return None
 
 
 def find_near_duplicate(conn, signature: dict) -> dict | None:
@@ -221,6 +305,153 @@ def find_near_duplicate(conn, signature: dict) -> dict | None:
         if score >= NEAR_DUPLICATE_THRESHOLD and (best is None or score > best["score"]):
             best = {"id": row["id"], "score": score}
     return best
+
+
+def ensure_batch_record(conn, batch_id: str) -> None:
+    now = utc_now()
+    conn.execute(
+        """
+        INSERT INTO asset_batches (id, status, created_at, updated_at)
+        VALUES (?, 'queued', ?, ?)
+        ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at
+        """,
+        (batch_id, now, now),
+    )
+
+
+def create_reserved_product_region(conn, asset_id: str) -> None:
+    now = utc_now()
+    conn.execute(
+        """
+        INSERT INTO asset_product_regions (id, asset_id, region_index, status, created_at, updated_at)
+        VALUES (?, ?, 0, 'reserved', ?, ?)
+        """,
+        (str(uuid.uuid4()), asset_id, now, now),
+    )
+
+
+def refresh_batch_progress(conn, batch_id: str) -> None:
+    ensure_batch_record(conn, batch_id)
+    asset_rows = conn.execute("SELECT * FROM assets WHERE upload_batch_id = ?", (batch_id,)).fetchall()
+    total = len(asset_rows)
+    duplicated = sum(1 for row in asset_rows if row["duplicate_status"] != "unique")
+    corrupted = sum(1 for row in asset_rows if row["ingestion_status"] == "corrupted")
+    low_quality = sum(1 for row in asset_rows if row["quality_status"] == "low_quality")
+    coarse_classified = sum(1 for row in asset_rows if row["asset_type"] != "unknown")
+    failed_row = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM analysis_jobs
+        JOIN assets ON assets.id = analysis_jobs.asset_id
+        WHERE assets.upload_batch_id = ? AND analysis_jobs.status = 'failed'
+        """,
+        (batch_id,),
+    ).fetchone()
+    matched_row = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM vision_observations
+        JOIN assets ON assets.id = vision_observations.asset_id
+        WHERE assets.upload_batch_id = ?
+          AND vision_observations.structured_output NOT LIKE '%"product_name": "Unknown"%'
+        """,
+        (batch_id,),
+    ).fetchone()
+    unknown_row = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM vision_observations
+        JOIN assets ON assets.id = vision_observations.asset_id
+        WHERE assets.upload_batch_id = ?
+          AND vision_observations.structured_output LIKE '%"product_name": "Unknown"%'
+        """,
+        (batch_id,),
+    ).fetchone()
+    review_row = conn.execute(
+        """
+        SELECT COUNT(DISTINCT review_queue.id) AS count
+        FROM review_queue
+        WHERE review_queue.status = 'pending'
+          AND (
+            review_queue.item_id IN (SELECT id FROM assets WHERE upload_batch_id = ?)
+            OR review_queue.item_id IN (
+                SELECT vision_observations.id
+                FROM vision_observations
+                JOIN assets ON assets.id = vision_observations.asset_id
+                WHERE assets.upload_batch_id = ?
+            )
+          )
+        """,
+        (batch_id, batch_id),
+    ).fetchone()
+    openai_row = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM vision_observations
+        JOIN assets ON assets.id = vision_observations.asset_id
+        WHERE assets.upload_batch_id = ?
+          AND vision_observations.structured_output LIKE '%"openai_vision_called": true%'
+        """,
+        (batch_id,),
+    ).fetchone()
+    status = "completed" if total and (matched_row["count"] + unknown_row["count"] + corrupted) >= total else "processing"
+    conn.execute(
+        """
+        UPDATE asset_batches
+        SET status = ?, total_files = ?, ingested = ?, duplicated = ?, corrupted = ?,
+            low_quality = ?, coarse_classified = ?, matched = ?, unknown = ?,
+            review_needed = ?, failed = ?, openai_vision_calls_used = ?,
+            estimated_cost = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            status,
+            total,
+            total - corrupted,
+            duplicated,
+            corrupted,
+            low_quality,
+            coarse_classified,
+            int(matched_row["count"]),
+            int(unknown_row["count"]) + corrupted,
+            int(review_row["count"]),
+            int(failed_row["count"]),
+            int(openai_row["count"]),
+            round(int(openai_row["count"]) * 0.002, 6),
+            utc_now(),
+            batch_id,
+        ),
+    )
+
+
+def record_duplicate_attempt(conn, batch_id: str) -> None:
+    ensure_batch_record(conn, batch_id)
+    conn.execute(
+        """
+        UPDATE asset_batches
+        SET total_files = total_files + 1,
+            duplicated = duplicated + 1,
+            review_needed = review_needed + 1,
+            status = 'processing',
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (utc_now(), batch_id),
+    )
+
+
+def batch_progress(batch_id: str | None = None) -> list[dict[str, Any]]:
+    with connect() as conn:
+        if batch_id:
+            rows = conn.execute("SELECT * FROM asset_batches WHERE id = ? ORDER BY created_at DESC", (batch_id,)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM asset_batches ORDER BY created_at DESC").fetchall()
+    results = []
+    for row in rows:
+        item = dict(row)
+        item["metadata_json"] = decode_json(item.get("metadata_json"), {})
+        results.append(item)
+    return results
 
 
 async def save_upload_file(file: UploadFile, batch_id: str) -> dict:
