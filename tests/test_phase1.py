@@ -818,5 +818,23 @@ def test_architecture_decisions_doc_locks_phase1_rules():
         assert phrase in text
 
 
+def test_project_north_star_defines_reality_image_engine_goal():
+    text = Path("PROJECT_NORTH_STAR.md").read_text(encoding="utf-8")
+    for phrase in (
+        "Reality Image Engine",
+        "Product",
+        "Scene",
+        "真实到像真人拍出来的照片",
+        "它是否能提高最终图片的真实性",
+        "Product Recognition Engine",
+    ):
+        assert phrase in text
+
+    architecture = Path("ARCHITECTURE_DECISIONS.md").read_text(encoding="utf-8")
+    assert "PROJECT_NORTH_STAR.md" in architecture
+    assert "highest priority project document" in architecture
+    assert "Official Catalog, Product DNA, Structure DNA, Unknown, Confidence, Evidence, and Review Queue remain correct Phase 1 foundations" in architecture
+
+
 def make_solid_image(path: Path, color: tuple[int, int, int]) -> None:
     Image.new("RGB", (64, 64), color).save(path)

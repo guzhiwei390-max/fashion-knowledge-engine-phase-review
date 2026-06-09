@@ -1,6 +1,6 @@
 # Current Version
 
-当前版本号：Phase 1 Reserved Extension Architecture v0.5
+当前版本号：Phase 1 North Star Alignment v0.6
 
 当前 Commit Hash：pending until commit; see final response for exact hash
 
@@ -21,6 +21,7 @@
 - Expanded Official Product Assets for logo, zipper, hardware, stitching
 - Architecture decision log
 - Reserved database/API architecture for Success Library, Negative Library, Commercial Score, Trend Timeline, Region Layer, and Learning Feedback Loop
+- PROJECT_NORTH_STAR.md as the highest priority project goal document
 - Regression tests for Unknown-first, confidence routing, evidence output, review queue, duplicate handling, and architecture rules
 
 ---
@@ -78,6 +79,8 @@
 - Product Structure Engine is brand agnostic and covers collar, zipper, logo_position, stitching, back_structure, sleeve_structure, hem_shape, fit_shape, pocket, hardware, material_behavior.
 - OpenAI Vision remains a secondary verification/detail source and cannot create products outside Official Catalog.
 - Architecture rules are now recorded in ARCHITECTURE_DECISIONS.md.
+- PROJECT_NORTH_STAR.md now defines the final goal as Reality Image Engine, not Product Recognition Engine.
+- Existing Official Catalog, Official Assets, Product DNA, Structure DNA, Unknown, Confidence, Evidence, and Review Queue modules are explicitly preserved as correct Phase 1 foundations.
 - Success Library, Negative Library, Commercial Score, Trend Timeline, Region Layer, and Learning Feedback Loop are reserved-only extension points.
 - Reserved future modules have database structure and API design entries, but no Phase 1 logic, pages, scoring, trend analysis, region algorithms, or feedback automation.
 
@@ -99,7 +102,7 @@
 - Generate Garment Validation Rules from evidence-backed Product DNA.
 - Retrieve Product DNA, Material DNA, contextual DNA placeholders, and Knowledge Card.
 - Inspect reserved future extension architecture through GET /api/extensions/reserved.
-- Run automated tests: 29 passing.
+- Run automated tests: 30 passing.
 
 ---
 
@@ -128,6 +131,7 @@
 - Add stronger near-duplicate clustering for large batches.
 - Add product variant and color confidence evidence in Product DNA.
 - Keep future growth modules inactive until product recognition quality is stable.
+- Evaluate every future feature against one question: does it improve final image realism?
 
 ---
 
@@ -143,3 +147,4 @@
 - Product Structure Engine 是否品牌无关，而不是围绕 Define 特化。
 - Phase 1 是否没有引入 AI 生图、换装、模特、场景生成、扩图或内容生成。
 - Success Library、Negative Library、Commercial Score、Trend Timeline、Region Layer、Learning Feedback Loop 是否只做了预留，没有提前实现逻辑、页面或算法。
+- PROJECT_NORTH_STAR.md 是否清楚规定项目最终目标是 Reality Image Engine，而不是 Product Recognition Engine。

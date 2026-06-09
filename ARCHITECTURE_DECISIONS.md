@@ -1,5 +1,17 @@
 # Architecture Decisions
 
+## Project North Star
+
+`PROJECT_NORTH_STAR.md` is the highest priority project document.
+
+The final project goal is Reality Image Engine: input Product + Scene, output a photo that feels like a real human-captured moment.
+
+Official Catalog, Product DNA, Structure DNA, Unknown, Confidence, Evidence, and Review Queue remain correct Phase 1 foundations because they prevent product errors before future image generation work exists.
+
+Future features must answer one question before development: does this improve the realism of the final image?
+
+If a feature does not improve final image realism, do not build it.
+
 ## Unknown First
 
 If the system cannot prove a product, structure field, material, logo, zipper, category, scene, or source from stored evidence, it must return `Unknown`.
