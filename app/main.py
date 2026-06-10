@@ -504,6 +504,18 @@ ADMIN_HTML = """
       max-height: 340px;
     }
     .unknown { color: var(--danger); font-weight: 700; }
+    .status {
+      margin-top: 10px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fffdf9;
+      color: var(--muted);
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+    .status.ok { border-color: #7aad9f; color: var(--accent); }
+    .status.error { border-color: #c98580; color: var(--danger); }
     @media (max-width: 900px) {
       header { display: block; padding: 22px; }
       main { padding: 18px; }
@@ -563,13 +575,15 @@ ADMIN_HTML = """
         <h2>Batch Upload</h2>
         <form id="uploadForm">
           <input type="file" name="files" multiple accept="image/*" />
-          <button>Upload Images</button>
+          <button type="submit">Upload Images</button>
         </form>
+        <div id="uploadStatus" class="status">Choose images, then click Upload Images.</div>
         <h2 style="margin-top:22px">Zip Import</h2>
         <form id="zipForm">
           <input type="file" name="file" accept=".zip" />
-          <button>Import Zip</button>
+          <button type="submit">Import Zip</button>
         </form>
+        <div id="zipStatus" class="status">Choose a zip file, then click Import Zip.</div>
         <h2 style="margin-top:22px">Search</h2>
         <form id="searchForm">
           <input name="brand" placeholder="Brand, e.g. Lululemon" />
@@ -611,18 +625,41 @@ ADMIN_HTML = """
   <script>
     const result = document.querySelector("#result");
     const show = data => result.textContent = JSON.stringify(data, null, 2);
+    function setStatus(selector, text, kind = "") {
+      const node = document.querySelector(selector);
+      if (!node) return;
+      node.textContent = text;
+      node.className = `status ${kind}`.trim();
+    }
     const esc = value => String(value ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
-    async function postForm(url, form) {
-      const res = await fetch(url, { method: "POST", body: new FormData(form) });
-      const data = await res.json();
-      show(data);
-      await refreshAll();
+    async function postForm(url, form, statusSelector = null) {
+      const button = form.querySelector("button[type='submit'], button");
+      if (statusSelector) setStatus(statusSelector, "Uploading... please wait.");
+      if (button) button.disabled = true;
+      try {
+        const res = await fetch(url, { method: "POST", body: new FormData(form) });
+        const data = await res.json().catch(() => ({ result: "Unknown", detail: "Server returned a non-JSON response." }));
+        show(data);
+        if (!res.ok) {
+          const detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || data);
+          if (statusSelector) setStatus(statusSelector, `Failed: ${detail}`, "error");
+          return;
+        }
+        if (statusSelector) setStatus(statusSelector, `Done: ${JSON.stringify(data)}`, "ok");
+        await refreshAll();
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error);
+        show({ result: "Unknown", error: message });
+        if (statusSelector) setStatus(statusSelector, `Failed: ${message}`, "error");
+      } finally {
+        if (button) button.disabled = false;
+      }
     }
     document.querySelector("#uploadForm").addEventListener("submit", e => {
-      e.preventDefault(); postForm("/api/upload", e.currentTarget);
+      e.preventDefault(); postForm("/api/upload", e.currentTarget, "#uploadStatus");
     });
     document.querySelector("#zipForm").addEventListener("submit", e => {
-      e.preventDefault(); postForm("/api/import/zip", e.currentTarget);
+      e.preventDefault(); postForm("/api/import/zip", e.currentTarget, "#zipStatus");
     });
     document.querySelector("#searchForm").addEventListener("submit", async e => {
       e.preventDefault();
