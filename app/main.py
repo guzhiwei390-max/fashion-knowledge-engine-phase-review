@@ -598,6 +598,15 @@ ADMIN_HTML = """
     }
     .status.ok { border-color: #7aad9f; color: var(--accent); }
     .status.error { border-color: #c98580; color: var(--danger); }
+    .status.warn { border-color: #d8a641; color: #7b5600; background: #fff8e4; }
+    .resultBox {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: #fffdf9;
+      margin-bottom: 12px;
+    }
+    .resultTitle { font-weight: 760; margin-bottom: 6px; }
     @media (max-width: 900px) {
       header { display: block; padding: 22px; }
       main { padding: 18px; }
@@ -637,6 +646,7 @@ ADMIN_HTML = """
               <input type="hidden" name="max_pages" value="8" />
               <button type="submit">Learn Official Catalog</button>
             </form>
+            <div id="learnStatus" class="status">Paste a public official site, category page, or product page URL.</div>
             <div class="meta" style="margin-top:10px">The system reads public allowed official pages, builds Official Catalog, then resumes product matching for uploaded batches.</div>
           </div>
           <details class="step">
@@ -670,6 +680,10 @@ ADMIN_HTML = """
       </section>
       <section>
         <h2>Result</h2>
+        <div id="resultSummary" class="resultBox">
+          <div class="resultTitle">Ready</div>
+          <div class="meta">Upload a zip or let the system learn an official site.</div>
+        </div>
         <pre id="result">{ "status": "ready" }</pre>
       </section>
     </div>
@@ -700,7 +714,31 @@ ADMIN_HTML = """
   </main>
   <script>
     const result = document.querySelector("#result");
-    const show = data => result.textContent = JSON.stringify(data, null, 2);
+    const resultSummary = document.querySelector("#resultSummary");
+    function show(data) {
+      result.textContent = JSON.stringify(data, null, 2);
+      renderResultSummary(data);
+    }
+    function renderResultSummary(data) {
+      const marker = data && (data.result || data.status || data.fallback || "");
+      if (marker === "Needs Manual Import" || data.fallback === "Needs Manual Import") {
+        resultSummary.innerHTML = `<div class="resultTitle">Official site access needs fallback</div><div class="meta">The site could not be read through public compliant access. This is not a raw asset upload failure. You can still upload zip files; product identity matching stays paused until an Official Catalog is available.</div>`;
+        resultSummary.className = "resultBox status warn";
+        return;
+      }
+      if (data && data.batch_id) {
+        resultSummary.innerHTML = `<div class="resultTitle">Batch accepted</div><div class="meta">Batch ${esc(data.batch_id)} was ingested. If Official Catalog is missing, product matching is paused instead of guessed.</div>`;
+        resultSummary.className = "resultBox status ok";
+        return;
+      }
+      if (data && (data.imported || data.catalog_count)) {
+        resultSummary.innerHTML = `<div class="resultTitle">Official Catalog updated</div><div class="meta">Catalog records were learned or imported. Paused matching jobs can resume.</div>`;
+        resultSummary.className = "resultBox status ok";
+        return;
+      }
+      resultSummary.innerHTML = `<div class="resultTitle">Result</div><div class="meta">See details below.</div>`;
+      resultSummary.className = "resultBox";
+    }
     function setStatus(selector, text, kind = "") {
       const node = document.querySelector(selector);
       if (!node) return;
@@ -721,7 +759,10 @@ ADMIN_HTML = """
           if (statusSelector) setStatus(statusSelector, `Failed: ${detail}`, "error");
           return;
         }
-        if (statusSelector) setStatus(statusSelector, `Done: ${JSON.stringify(data)}`, "ok");
+        if (statusSelector) {
+          const isFallback = data && (data.result === "Needs Manual Import" || data.fallback === "Needs Manual Import");
+          setStatus(statusSelector, isFallback ? "Official site could not be read compliantly. Use Manual fallback only for this brand/source, or try a different public category/product URL." : `Done: ${JSON.stringify(data)}`, isFallback ? "warn" : "ok");
+        }
         await refreshAll();
       } catch (error) {
         const message = error && error.message ? error.message : String(error);
@@ -772,7 +813,7 @@ ADMIN_HTML = """
       e.preventDefault(); postForm("/api/catalog/import", e.currentTarget);
     });
     document.querySelector("#officialSiteLearningForm").addEventListener("submit", e => {
-      e.preventDefault(); postForm("/api/catalog/learn-site", e.currentTarget);
+      e.preventDefault(); postForm("/api/catalog/learn-site", e.currentTarget, "#learnStatus");
     });
     function item(html) { return `<div class="item">${html}</div>`; }
     function renderAssets(rows) {
