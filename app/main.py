@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from .assets import batch_progress, import_zip_file, refresh_batch_progress, save_upload_file
 from .catalog import (
     add_official_visual_reference,
+    batch_bootstrap_official_catalog,
     bootstrap_official_catalog,
     catalog_count,
     import_catalog_file,
@@ -19,12 +20,15 @@ from .catalog import (
     list_catalog,
     list_official_assets,
     list_visual_references,
+    parse_batch_official_site_entries_from_csv,
+    parse_batch_official_site_entries_from_json,
+    parse_batch_official_site_entries_from_text,
 )
 from .config import DATA_DIR, UPLOAD_DIR
 from .database import connect, decode_json, init_db
 from .knowledge import build_knowledge, list_knowledge_cards, search_knowledge
 from .pipelines import RESERVED_EXTENSION_MODULES, pipeline_design
-from .review import list_review_items, resolve_review_item
+from .review import list_official_candidate_groups, list_review_items, resolve_official_candidate_group, resolve_review_item
 from .unknown import unknown_response
 from .vision import latest_observations, process_pending_jobs
 
@@ -257,6 +261,47 @@ async def learn_official_site(
     }
 
 
+@app.post("/api/catalog/learn-sites")
+async def learn_official_sites(
+    entries_text: Annotated[str | None, Form()] = None,
+    max_pages: Annotated[int, Form()] = 8,
+) -> dict:
+    entries = parse_batch_official_site_entries_from_text(entries_text or "")
+    if not entries:
+        raise HTTPException(status_code=400, detail="Provide newline entries like: Brand, https://official-site.example/")
+    result = await batch_bootstrap_official_catalog(entries, max_pages=max_pages)
+    result["unblocked_jobs"] = unblock_missing_catalog_jobs() if catalog_count() else 0
+    return result
+
+
+@app.post("/api/catalog/learn-sites-csv")
+async def learn_official_sites_csv(
+    file: Annotated[UploadFile, File(...)],
+    max_pages: Annotated[int, Form()] = 8,
+) -> dict:
+    content = (await file.read()).decode("utf-8-sig")
+    entries = parse_batch_official_site_entries_from_csv(content)
+    if not entries:
+        raise HTTPException(status_code=400, detail="CSV must include brand,url,type,priority,note")
+    result = await batch_bootstrap_official_catalog(entries, max_pages=max_pages)
+    result["unblocked_jobs"] = unblock_missing_catalog_jobs() if catalog_count() else 0
+    return result
+
+
+@app.post("/api/catalog/learn-sites-json")
+async def learn_official_sites_json(
+    file: Annotated[UploadFile, File(...)],
+    max_pages: Annotated[int, Form()] = 8,
+) -> dict:
+    content = (await file.read()).decode("utf-8")
+    entries = parse_batch_official_site_entries_from_json(content)
+    if not entries:
+        raise HTTPException(status_code=400, detail="JSON must be a list or { brands: [] }")
+    result = await batch_bootstrap_official_catalog(entries, max_pages=max_pages)
+    result["unblocked_jobs"] = unblock_missing_catalog_jobs() if catalog_count() else 0
+    return result
+
+
 def unblock_missing_catalog_jobs() -> int:
     with connect() as conn:
         conn.execute(
@@ -321,6 +366,15 @@ def process_jobs(limit: int = 100) -> dict:
     job_result = process_pending_jobs(limit=limit)
     knowledge_result = build_knowledge()
     return {"jobs": job_result, "knowledge": knowledge_result}
+
+
+@app.post("/api/batches/{batch_id}/process")
+def process_batch(batch_id: str, limit: int = 100) -> dict:
+    job_result = process_pending_jobs(limit=limit, batch_id=batch_id)
+    knowledge_result = build_knowledge()
+    with connect() as conn:
+        refresh_batch_progress(conn, batch_id)
+    return {"batch_id": batch_id, "jobs": job_result, "knowledge": knowledge_result, "batch": batch_progress(batch_id)[0] if batch_progress(batch_id) else None}
 
 
 def pagination(limit: int = 100, offset: int = 0) -> tuple[int, int]:
@@ -492,6 +546,27 @@ def review_queue(
         return list_review_items(conn, status=status, reason=reason, item_type=item_type, limit=limit, offset=offset)
 
 
+@app.get("/api/official-candidate-groups")
+def official_candidate_groups(status: str | None = None, limit: int = 100, offset: int = 0) -> dict:
+    limit, offset = pagination(limit, offset)
+    with connect() as conn:
+        return list_official_candidate_groups(conn, status=status, limit=limit, offset=offset)
+
+
+@app.post("/api/official-candidate-groups/{group_id}/action")
+async def official_candidate_group_action(group_id: str, payload: dict) -> dict:
+    resolved_by = str(payload.get("resolved_by", "admin"))
+    with connect() as conn:
+        result = resolve_official_candidate_group(conn, group_id, payload, resolved_by=resolved_by)
+        if result.get("status") in {"group_approved", "group_rejected", "group_merged", "group_split"}:
+            batch_rows = conn.execute("SELECT DISTINCT upload_batch_id FROM assets").fetchall()
+            for row in batch_rows:
+                refresh_batch_progress(conn, row["upload_batch_id"])
+    if result.get("status") == "group_approved":
+        build_knowledge()
+    return result
+
+
 @app.post("/api/review-queue/{review_id}/resolve")
 async def resolve_review_queue_item(review_id: str, resolution: dict) -> dict:
     with connect() as conn:
@@ -636,13 +711,14 @@ ADMIN_HTML = """
     }
     h2 { margin: 0 0 14px; font-size: 16px; }
     form { display: grid; gap: 12px; }
-    input, button {
+    input, textarea, button {
       font: inherit;
       border-radius: 6px;
       border: 1px solid var(--line);
       padding: 10px 12px;
       background: #fff;
     }
+    textarea { min-height: 120px; resize: vertical; }
     button {
       border-color: var(--accent);
       background: var(--accent);
@@ -723,8 +799,27 @@ ADMIN_HTML = """
             <div id="zipStatus" class="status">You can upload now. Product identity will wait if the official catalog is not ready.</div>
           </div>
           <div class="step">
-            <div class="stepTitle"><span class="badge">2</span><span>Let the system learn the brand website</span></div>
-            <form id="officialSiteLearningForm">
+            <div class="stepTitle"><span class="badge">2</span><span>Learn official brand sites first</span></div>
+            <form id="batchOfficialSiteLearningForm">
+              <textarea name="entries_text" placeholder="Lululemon, https://shop.lululemon.com/
+Alo, https://www.aloyoga.com/
+On, https://www.on.com/
+Arc'teryx, https://arcteryx.com/
+Ralph Lauren, https://www.ralphlauren.com/"></textarea>
+              <input type="hidden" name="max_pages" value="8" />
+              <button type="submit">Batch Learn Official Catalog</button>
+            </form>
+            <div id="batchLearnStatus" class="status">Provide brand official entrances before large material imports.</div>
+            <form id="batchOfficialSiteCsvForm" style="margin-top:12px">
+              <input type="file" name="file" accept=".csv,.json" />
+              <input type="hidden" name="max_pages" value="8" />
+              <button type="submit" class="secondary">Import URL List CSV/JSON</button>
+            </form>
+            <div class="meta" style="margin-top:10px">CSV/JSON here is only for official site entrance lists, not manual product catalog creation.</div>
+          </div>
+          <details class="step">
+            <summary class="stepTitle"><span class="badge">2a</span><span>Single official URL</span></summary>
+            <form id="officialSiteLearningForm" style="margin-top:12px">
               <input name="brand" placeholder="Brand name, e.g. Lululemon" />
               <input name="url" placeholder="Official homepage, category page, or product page URL" />
               <input type="hidden" name="max_pages" value="8" />
@@ -732,7 +827,7 @@ ADMIN_HTML = """
             </form>
             <div id="learnStatus" class="status">Paste a public official site, category page, or product page URL.</div>
             <div class="meta" style="margin-top:10px">The system first tries the homepage, then sitemap, then public category/product candidates. If learning is incomplete, raw zip upload still works and product identity waits.</div>
-          </div>
+          </details>
           <details class="step">
             <summary class="stepTitle"><span class="badge">!</span><span>Manual fallback only</span></summary>
             <div class="meta" style="margin:8px 0 12px">Use this only after public URLs and candidate official references cannot complete catalog learning.</div>
@@ -900,6 +995,15 @@ ADMIN_HTML = """
     });
     document.querySelector("#zipForm").addEventListener("submit", e => {
       e.preventDefault(); postForm("/api/import/zip", e.currentTarget, "#zipStatus");
+    });
+    document.querySelector("#batchOfficialSiteLearningForm").addEventListener("submit", e => {
+      e.preventDefault(); postForm("/api/catalog/learn-sites", e.currentTarget, "#batchLearnStatus");
+    });
+    document.querySelector("#batchOfficialSiteCsvForm").addEventListener("submit", e => {
+      e.preventDefault();
+      const file = e.currentTarget.querySelector('input[type="file"]').files[0];
+      const url = file && file.name.toLowerCase().endsWith(".json") ? "/api/catalog/learn-sites-json" : "/api/catalog/learn-sites-csv";
+      postForm(url, e.currentTarget, "#batchLearnStatus");
     });
     document.querySelector("#searchForm").addEventListener("submit", async e => {
       e.preventDefault();

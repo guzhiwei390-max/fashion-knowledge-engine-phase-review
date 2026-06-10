@@ -313,7 +313,7 @@ def build_confidence_map(structured: dict[str, Any]) -> dict[str, float]:
     }
 
 
-def process_pending_jobs(limit: int = 5000) -> dict[str, Any]:
+def process_pending_jobs(limit: int = 5000, batch_id: str | None = None) -> dict[str, Any]:
     processed = 0
     failed = 0
     paused = 0
@@ -321,17 +321,20 @@ def process_pending_jobs(limit: int = 5000) -> dict[str, Any]:
     vision_remaining_by_batch: dict[str, int] = {}
     with connect() as conn:
         official_catalog_ready = conn.execute("SELECT COUNT(*) AS count FROM official_products").fetchone()["count"] > 0
+        batch_filter = "AND assets.upload_batch_id = ?" if batch_id else ""
+        params: tuple[Any, ...] = (batch_id, limit) if batch_id else (limit,)
         jobs = conn.execute(
-            """
+            f"""
             SELECT analysis_jobs.*, assets.file_uri, assets.original_name, assets.source_type,
                    assets.upload_batch_id, assets.asset_type, assets.quality_status, assets.duplicate_status
             FROM analysis_jobs
             JOIN assets ON assets.id = analysis_jobs.asset_id
             WHERE analysis_jobs.status IN ('queued', 'pending', 'failed', 'blocked_missing_official_catalog')
+              {batch_filter}
             ORDER BY analysis_jobs.created_at ASC
             LIMIT ?
             """,
-            (limit,),
+            params,
         ).fetchall()
 
         for job in jobs:

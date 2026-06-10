@@ -287,7 +287,39 @@ async def bootstrap_official_catalog(
         )
         if sitemap["status"] != "read":
             continue
-        for candidate in candidate_urls_from_sitemap_xml(str(sitemap["text"]), url):
+        sitemap_text = str(sitemap["text"])
+        nested_sitemaps = [
+            nested
+            for nested in sitemap_locs_from_xml(sitemap_text)
+            if same_site(url, nested) and "sitemap" in nested.lower() and nested != sitemap_url
+        ][: max_pages]
+        for nested_url in nested_sitemaps:
+            nested = await fetch_public_text(nested_url, accept="application/xml,text/xml,text/plain,*/*")
+            stages.append(
+                {
+                    "stage": "sitemap_index_child",
+                    "url": nested_url,
+                    "status": nested["status"],
+                    "reason": nested.get("reason", ""),
+                    "http_status": nested.get("http_status"),
+                }
+            )
+            record_parse_event(
+                job_id,
+                "sitemap_index_child",
+                nested_url,
+                str(nested["status"]),
+                http_status=nested.get("http_status"),
+                reason=str(nested.get("reason", "")),
+            )
+            if nested["status"] == "read":
+                for candidate in candidate_urls_from_sitemap_xml(str(nested["text"]), url):
+                    if candidate not in candidate_urls:
+                        candidate_urls.append(candidate)
+                        record_url_candidate(job_id, canonical, candidate, candidate_type_from_url(candidate), "sitemap_index_child")
+            if len(candidate_urls) >= max_pages * 2:
+                break
+        for candidate in candidate_urls_from_sitemap_xml(sitemap_text, url):
             if candidate not in candidate_urls:
                 candidate_urls.append(candidate)
                 record_url_candidate(job_id, canonical, candidate, candidate_type_from_url(candidate), "sitemap")
@@ -367,6 +399,162 @@ async def bootstrap_official_catalog(
     add_bootstrap_context(response, canonical, url, category_url, product_url)
     finalize_catalog_import_job(job_id, response)
     return response
+
+
+async def batch_bootstrap_official_catalog(entries: list[dict[str, Any]], max_pages: int = MAX_CATEGORY_TREE_PAGES) -> dict[str, Any]:
+    results: list[dict[str, Any]] = []
+    totals = {
+        "entries_received": len(entries),
+        "urls_attempted": 0,
+        "ready": 0,
+        "partial": 0,
+        "blocked": 0,
+        "needs_category_url": 0,
+        "needs_product_url": 0,
+        "needs_official_candidate_review": 0,
+        "official_products_created": 0,
+        "official_product_assets_created": 0,
+        "official_visual_references_created": 0,
+    }
+    for entry in entries:
+        brand = str(entry.get("brand") or "").strip()
+        urls = entry.get("urls") if isinstance(entry.get("urls"), list) else [entry.get("url")]
+        priority = str(entry.get("priority") or "medium")
+        note = str(entry.get("note") or "")
+        for input_url in [str(item).strip() for item in urls if item]:
+            totals["urls_attempted"] += 1
+            try:
+                result = await bootstrap_official_catalog(input_url, brand, max_pages=max_pages)
+            except HTTPException as exc:
+                result = {
+                    "brand": brand or UNKNOWN,
+                    "input_url": input_url or UNKNOWN,
+                    "official_catalog_status": "blocked",
+                    "product_matching_status": "blocked_missing_official_catalog",
+                    "blocked_reason": str(exc.detail),
+                    "next_best_action": "provide_supported_brand",
+                }
+            item = official_learning_batch_item(result, priority=priority, note=note)
+            results.append(item)
+            status = item["official_catalog_status"]
+            next_action = item["next_action"]
+            if status == "ready":
+                totals["ready"] += 1
+            elif status == "partial":
+                totals["partial"] += 1
+            elif status == "blocked":
+                totals["blocked"] += 1
+            else:
+                totals[next_action if next_action in totals else "blocked"] += 1
+            totals["official_products_created"] += int(item["official_products_created"])
+            totals["official_product_assets_created"] += int(item["official_product_assets_created"])
+            totals["official_visual_references_created"] += int(item["official_visual_references_created"])
+    return {"batch_official_site_learning": results, "totals": totals}
+
+
+def official_learning_batch_item(result: dict[str, Any], *, priority: str, note: str) -> dict[str, Any]:
+    products_created = int(result.get("official_products_created", 0) or 0)
+    assets_created = int(result.get("official_product_assets_created", 0) or 0)
+    refs_created = int(result.get("official_visual_references_created", 0) or 0)
+    raw_status = str(result.get("official_catalog_status") or "missing")
+    if products_created > 0 and refs_created > 0:
+        status = "ready"
+    elif products_created > 0:
+        status = "partial"
+    elif str(result.get("blocked_reason") or ""):
+        status = "blocked"
+    else:
+        status = "partial"
+    next_action = batch_next_action(result, products_created, assets_created, refs_created, raw_status)
+    return {
+        "brand": result.get("brand", UNKNOWN),
+        "input_url": result.get("input_url", result.get("url", UNKNOWN)),
+        "priority": priority,
+        "note": note,
+        "robots_status": {
+            "robots_txt_fetched": bool(result.get("robots_txt_fetched", False)),
+            "robots_allowed": bool(result.get("robots_allowed", False)),
+            "robots_url": result.get("robots_url", ""),
+        },
+        "sitemap_found": bool(result.get("sitemap_found", False)),
+        "candidate_urls_found": len(result.get("candidate_urls", []) or []),
+        "product_pages_parsed": int(result.get("parsed_product_pages_count", 0) or 0),
+        "official_products_created": products_created,
+        "official_product_assets_created": assets_created,
+        "official_visual_references_created": refs_created,
+        "official_catalog_status": status,
+        "next_action": next_action,
+        "blocked_reason": result.get("blocked_reason", ""),
+        "partial_reason": result.get("partial_reason", result.get("reason", "")),
+    }
+
+
+def batch_next_action(result: dict[str, Any], products_created: int, assets_created: int, refs_created: int, raw_status: str) -> str:
+    if products_created > 0 and refs_created > 0:
+        return "ready"
+    if products_created > 0 and refs_created == 0:
+        return "needs_official_candidate_review"
+    blocked_reason = str(result.get("blocked_reason") or "").lower()
+    if blocked_reason and any(marker in blocked_reason for marker in ("robots", "access", "denied", "login", "rate limited", "forbidden")):
+        return "needs_official_candidate_review"
+    next_best = str(result.get("next_best_action") or "")
+    if "category" in next_best:
+        return "needs_category_url"
+    if "product" in next_best:
+        return "needs_product_url"
+    if raw_status in {"blocked", "missing"} or result.get("blocked_reason"):
+        return "blocked"
+    return "needs_official_candidate_review"
+
+
+def parse_batch_official_site_entries_from_text(text: str) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [part.strip() for part in line.split(",", 1)]
+        if len(parts) == 2:
+            entries.append({"brand": parts[0], "urls": [parts[1]], "priority": "medium", "note": ""})
+    return entries
+
+
+def parse_batch_official_site_entries_from_csv(content: str) -> list[dict[str, Any]]:
+    rows = csv.DictReader(io.StringIO(content))
+    entries: list[dict[str, Any]] = []
+    for row in rows:
+        entries.append(
+            {
+                "brand": row.get("brand", ""),
+                "urls": [row.get("url", "")],
+                "type": row.get("type", ""),
+                "priority": row.get("priority", "medium"),
+                "note": row.get("note", ""),
+            }
+        )
+    return entries
+
+
+def parse_batch_official_site_entries_from_json(content: str) -> list[dict[str, Any]]:
+    payload = json.loads(content)
+    if isinstance(payload, dict):
+        payload = payload.get("brands", payload.get("entries", []))
+    if not isinstance(payload, list):
+        raise HTTPException(status_code=400, detail="Batch JSON must be a list or { brands: [] }")
+    entries: list[dict[str, Any]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        urls = item.get("urls") if isinstance(item.get("urls"), list) else [item.get("url")]
+        entries.append(
+            {
+                "brand": item.get("brand", ""),
+                "urls": urls,
+                "priority": item.get("priority", "medium"),
+                "note": item.get("note", ""),
+            }
+        )
+    return entries
 
 
 def add_bootstrap_context(result: dict[str, Any], brand: str, input_url: str, category_url: str | None, product_url: str | None) -> None:

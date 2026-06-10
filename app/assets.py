@@ -496,10 +496,23 @@ def create_official_candidate_asset(
     product_hint = product_hint_from_name(original_name)
     grouping_key = official_candidate_grouping_key(brand_hint, product_hint, visual_signature)
     candidate_id = str(uuid.uuid4())
+    candidate_type = official_candidate_type(original_name, classification, metadata)
+    candidate_confidence = official_candidate_confidence(classification, metadata)
+    why = official_candidate_reasons(original_name, classification, metadata)
+    related_assets = [
+        row["asset_id"]
+        for row in conn.execute(
+            "SELECT asset_id FROM official_candidate_assets WHERE grouping_key = ? ORDER BY created_at DESC LIMIT 20",
+            (grouping_key,),
+        ).fetchall()
+    ]
     signals = {
         "classification_signals": classification.get("signals", []),
         "content_signals": metadata.get("content_signals", {}),
         "original_name": original_name,
+        "why_this_is_official_like": why,
+        "candidate_confidence": candidate_confidence,
+        "related_assets": related_assets,
     }
     conn.execute(
         """
@@ -507,14 +520,15 @@ def create_official_candidate_asset(
             id, asset_id, brand_hint, product_name_hint, candidate_type, confidence,
             status, grouping_key, signals_json, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, 'official_like_candidate', ?, 'pending_review', ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending_review', ?, ?, ?, ?)
         """,
         (
             candidate_id,
             asset_id,
             brand_hint,
             product_hint,
-            official_candidate_confidence(classification, metadata),
+            candidate_type,
+            candidate_confidence,
             grouping_key,
             encode_json(signals),
             now,
@@ -557,29 +571,73 @@ def create_official_candidate_asset(
         item_type="official_candidate_asset",
         item_id=candidate_id,
         reason="official_like_candidate",
-        confidence=official_candidate_confidence(classification, metadata),
+        confidence=candidate_confidence,
         payload={
             "asset_id": asset_id,
             "brand_hint": brand_hint,
             "product_name_hint": product_hint,
-            "candidate_type": "official_like_candidate",
+            "candidate_type": candidate_type,
+            "candidate_confidence": candidate_confidence,
             "grouping_key": grouping_key,
+            "why_this_is_official_like": why,
+            "related_assets": related_assets,
             "message": "Official-like candidate found in uploaded materials. Confirm to create Official Truth.",
         },
     )
     return {"id": candidate_id, "asset_id": asset_id, "grouping_key": grouping_key}
 
 
+def official_candidate_type(original_name: str, classification: dict[str, Any], metadata: dict[str, Any]) -> str:
+    normalized = original_name.lower().replace("-", "_").replace(" ", "_")
+    content = metadata.get("content_signals", {})
+    if any(marker in normalized for marker in ("model", "worn", "wear", "on_body")) or content.get("human_like"):
+        return "official_model_candidate"
+    if any(marker in normalized for marker in ("detail", "logo", "zipper", "fabric", "hardware", "stitch", "closeup", "close_up")) or content.get("detail_like"):
+        return "official_detail_candidate"
+    if content.get("white_background") and not content.get("multi_subject") and not content.get("scene_like"):
+        return "official_white_bg_candidate"
+    if "official_like_filename" in classification.get("signals", []):
+        return "official_product_candidate"
+    return "official_like_candidate"
+
+
+def official_candidate_reasons(original_name: str, classification: dict[str, Any], metadata: dict[str, Any]) -> list[str]:
+    normalized = original_name.lower().replace("-", "_").replace(" ", "_")
+    content = metadata.get("content_signals", {})
+    reasons: list[str] = []
+    if "official_like_filename" in classification.get("signals", []):
+        reasons.append("filename contains official/catalog/product-page marker")
+    if content.get("white_background"):
+        reasons.append(f"white background ratio {content.get('white_ratio', 'unknown')}")
+    if not content.get("multi_subject") and content.get("object_count", 0) <= 2:
+        reasons.append(f"single or simple product subject count {content.get('object_count', 'unknown')}")
+    if content.get("detail_like"):
+        reasons.append("close detail-like composition")
+    if content.get("human_like"):
+        reasons.append("human/model-like composition")
+    if not content.get("scene_like"):
+        reasons.append("not scene-like")
+    if not reasons:
+        reasons.append("coarse classifier marked image as official-like candidate")
+    return reasons
+
+
 def official_candidate_confidence(classification: dict[str, Any], metadata: dict[str, Any]) -> float:
     signals = classification.get("signals", [])
     content = metadata.get("content_signals", {})
-    score = 0.55
+    score = 0.5
     if "content_official_like_white_background" in signals:
-        score += 0.25
+        score += 0.18
     if "official_like_filename" in signals:
-        score += 0.2
+        score += 0.22
     if content.get("white_background"):
         score += 0.1
+    if content.get("detail_like"):
+        score += 0.08
+    if content.get("human_like") and "official_like_filename" in signals:
+        score += 0.06
+    if content.get("multi_subject") or content.get("scene_like"):
+        score -= 0.18
     return min(0.95, round(score, 4))
 
 

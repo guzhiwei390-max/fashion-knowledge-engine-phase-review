@@ -115,6 +115,51 @@ def list_review_items(
     return {"review_queue": items, "total": total, "limit": limit, "offset": offset}
 
 
+def list_official_candidate_groups(conn, status: str | None = None, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    clauses = []
+    params: list[Any] = []
+    if status:
+        if status == "pending":
+            status = "pending_review"
+        clauses.append("official_candidate_groups.status = ?")
+        params.append(status)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    total = conn.execute(f"SELECT COUNT(*) AS count FROM official_candidate_groups {where}", params).fetchone()["count"]
+    rows = conn.execute(
+        f"""
+        SELECT official_candidate_groups.*,
+               assets.thumbnail_uri AS representative_thumbnail_uri,
+               assets.original_name AS representative_original_name
+        FROM official_candidate_groups
+        LEFT JOIN assets ON assets.id = official_candidate_groups.representative_asset_id
+        {where}
+        ORDER BY official_candidate_groups.updated_at DESC
+        LIMIT ? OFFSET ?
+        """,
+        (*params, limit, offset),
+    ).fetchall()
+    groups = []
+    for row in rows:
+        item = dict(row)
+        item["signals_json"] = decode_json(item.get("signals_json"), {})
+        item["related_assets"] = [
+            dict(candidate)
+            for candidate in conn.execute(
+                """
+                SELECT official_candidate_assets.*, assets.original_name, assets.thumbnail_uri
+                FROM official_candidate_assets
+                JOIN assets ON assets.id = official_candidate_assets.asset_id
+                WHERE official_candidate_assets.grouping_key = ?
+                ORDER BY official_candidate_assets.created_at DESC
+                LIMIT 50
+                """,
+                (row["grouping_key"],),
+            ).fetchall()
+        ]
+        groups.append(item)
+    return {"official_candidate_groups": groups, "total": total, "limit": limit, "offset": offset}
+
+
 def resolve_review_item(
     conn,
     *,
@@ -140,6 +185,162 @@ def resolve_review_item(
         (encode_json(resolution), resolved_by, now, now, review_id),
     )
     return {"status": "resolved", "review_id": review_id, "resolved_by": resolved_by, "learning_actions": learning_actions}
+
+
+def resolve_official_candidate_group(conn, group_id: str, payload: dict[str, Any], resolved_by: str = "admin") -> dict[str, Any]:
+    group = conn.execute("SELECT * FROM official_candidate_groups WHERE id = ?", (group_id,)).fetchone()
+    if not group:
+        return {"result": "Unknown", "unknown": ["official_candidate_group"]}
+    action = str(payload.get("action") or "").strip().lower()
+    if action == "approve":
+        return approve_official_candidate_group(conn, dict(group), payload, resolved_by)
+    if action == "reject":
+        return reject_official_candidate_group(conn, dict(group), payload, resolved_by)
+    if action == "merge":
+        return merge_official_candidate_group(conn, dict(group), payload, resolved_by)
+    if action == "split":
+        return split_official_candidate_group(conn, dict(group), payload, resolved_by)
+    return {"result": "Unknown", "unknown": ["action"]}
+
+
+def approve_official_candidate_group(conn, group: dict[str, Any], payload: dict[str, Any], resolved_by: str) -> dict[str, Any]:
+    candidates = conn.execute(
+        "SELECT * FROM official_candidate_assets WHERE grouping_key = ? AND status != 'rejected' ORDER BY created_at ASC",
+        (group["grouping_key"],),
+    ).fetchall()
+    if not candidates:
+        return {"result": "Unknown", "unknown": ["official_candidate_assets"]}
+    created = []
+    resolution = dict(payload)
+    resolution.setdefault("brand", group["brand_hint"])
+    resolution.setdefault("product_name", group["product_name_hint"])
+    resolution.setdefault("asset_type", "official_white_bg")
+    for candidate in candidates:
+        result = confirm_official_candidate_asset(conn, candidate["id"], resolution, resolved_by)
+        if result.get("status") == "official_truth_created":
+            created.append(result)
+            conn.execute(
+                """
+                UPDATE review_queue
+                SET status = 'resolved',
+                    resolution_json = ?,
+                    resolved_by = ?,
+                    resolved_at = ?,
+                    updated_at = ?
+                WHERE item_type = 'official_candidate_asset'
+                  AND item_id = ?
+                  AND status = 'pending'
+                """,
+                (encode_json(payload), resolved_by, utc_now(), utc_now(), candidate["id"]),
+            )
+    return {
+        "status": "group_approved",
+        "group_id": group["id"],
+        "confirmed_candidates": len(created),
+        "official_product_id": created[0]["product_id"] if created else None,
+        "official_product_asset_ids": [item["official_product_asset_id"] for item in created],
+        "official_visual_reference_ids": [item["official_visual_reference_id"] for item in created],
+    }
+
+
+def reject_official_candidate_group(conn, group: dict[str, Any], payload: dict[str, Any], resolved_by: str) -> dict[str, Any]:
+    now = utc_now()
+    conn.execute(
+        "UPDATE official_candidate_groups SET status = 'rejected', updated_at = ? WHERE id = ?",
+        (now, group["id"]),
+    )
+    conn.execute(
+        "UPDATE official_candidate_assets SET status = 'rejected', updated_at = ? WHERE grouping_key = ?",
+        (now, group["grouping_key"]),
+    )
+    conn.execute(
+        """
+        UPDATE review_queue
+        SET status = 'resolved',
+            resolution_json = ?,
+            resolved_by = ?,
+            resolved_at = ?,
+            updated_at = ?
+        WHERE item_type = 'official_candidate_asset'
+          AND item_id IN (SELECT id FROM official_candidate_assets WHERE grouping_key = ?)
+          AND status = 'pending'
+        """,
+        (encode_json(payload), resolved_by, now, now, group["grouping_key"]),
+    )
+    record_human_correction(conn, "official_candidate_group", group["id"], "status", group["status"], "rejected", resolved_by)
+    return {"status": "group_rejected", "group_id": group["id"]}
+
+
+def merge_official_candidate_group(conn, group: dict[str, Any], payload: dict[str, Any], resolved_by: str) -> dict[str, Any]:
+    target_group_id = str(payload.get("target_group_id") or "").strip()
+    target = conn.execute("SELECT * FROM official_candidate_groups WHERE id = ?", (target_group_id,)).fetchone()
+    if not target:
+        return {"result": "Unknown", "unknown": ["target_group_id"]}
+    now = utc_now()
+    conn.execute(
+        "UPDATE official_candidate_assets SET grouping_key = ?, updated_at = ? WHERE grouping_key = ?",
+        (target["grouping_key"], now, group["grouping_key"]),
+    )
+    conn.execute(
+        "UPDATE official_candidate_groups SET status = 'merged', updated_at = ? WHERE id = ?",
+        (now, group["id"]),
+    )
+    refresh_official_candidate_group_count(conn, target["grouping_key"])
+    record_human_correction(conn, "official_candidate_group", group["id"], "merged_into", group["grouping_key"], target["grouping_key"], resolved_by)
+    return {"status": "group_merged", "group_id": group["id"], "target_group_id": target["id"]}
+
+
+def split_official_candidate_group(conn, group: dict[str, Any], payload: dict[str, Any], resolved_by: str) -> dict[str, Any]:
+    candidate_ids = [str(item) for item in payload.get("candidate_ids", []) if item]
+    if not candidate_ids:
+        return {"result": "Unknown", "unknown": ["candidate_ids"]}
+    now = utc_now()
+    new_grouping_key = str(payload.get("new_grouping_key") or f"{group['grouping_key']}|split|{uuid.uuid4().hex[:8]}")
+    new_group_id = str(uuid.uuid4())
+    conn.execute(
+        """
+        INSERT INTO official_candidate_groups (
+            id, grouping_key, brand_hint, product_name_hint, candidate_count,
+            representative_asset_id, status, signals_json, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, 0, NULL, 'pending_review', ?, ?, ?)
+        """,
+        (
+            new_group_id,
+            new_grouping_key,
+            str(payload.get("brand_hint") or group["brand_hint"]),
+            str(payload.get("product_name_hint") or group["product_name_hint"]),
+            encode_json({"split_from_group_id": group["id"], "split_reason": payload.get("reason", "")}),
+            now,
+            now,
+        ),
+    )
+    placeholders = ",".join("?" for _ in candidate_ids)
+    conn.execute(
+        f"UPDATE official_candidate_assets SET grouping_key = ?, updated_at = ? WHERE id IN ({placeholders})",
+        (new_grouping_key, now, *candidate_ids),
+    )
+    refresh_official_candidate_group_count(conn, group["grouping_key"])
+    refresh_official_candidate_group_count(conn, new_grouping_key)
+    record_human_correction(conn, "official_candidate_group", group["id"], "split", group["grouping_key"], new_grouping_key, resolved_by)
+    return {"status": "group_split", "group_id": group["id"], "new_group_id": new_group_id, "moved_candidates": len(candidate_ids)}
+
+
+def refresh_official_candidate_group_count(conn, grouping_key: str) -> None:
+    row = conn.execute(
+        "SELECT COUNT(*) AS count, MIN(asset_id) AS representative_asset_id FROM official_candidate_assets WHERE grouping_key = ?",
+        (grouping_key,),
+    ).fetchone()
+    conn.execute(
+        """
+        UPDATE official_candidate_groups
+        SET candidate_count = ?,
+            representative_asset_id = ?,
+            updated_at = ?
+        WHERE grouping_key = ?
+        """,
+        (int(row["count"]), row["representative_asset_id"], utc_now(), grouping_key),
+    )
 
 
 def apply_review_resolution(conn, review: dict[str, Any], resolution: dict[str, Any], resolved_by: str) -> dict[str, Any]:

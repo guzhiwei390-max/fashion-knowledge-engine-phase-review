@@ -212,6 +212,10 @@ If no official products or assets are created, the run must remain `missing`, `b
 
 CSV/JSON Manual Import is fallback only. It should be used when official site learning cannot proceed because public access is not available, robots.txt disallows access, the page requires login, the site is region blocked, or anti-bot protections prevent compliant access.
 
+Batch Official Site Learning may accept multi-line text, CSV, or JSON, but those files are only official entrance lists. They are not Manual Product Catalog files. The user provides brand/site/category/product entrances; the system still owns public page discovery, sitemap discovery, product parsing, official asset creation, visual reference creation, and status decisions.
+
+If `official_products_created = 0`, the catalog cannot be marked `ready`. For blocked brands such as Lululemon in the current environment, the compliant fallback is Official Candidate Review from accessible official candidates, not fake catalog creation and not default manual Product CSV.
+
 Ordinary user uploads default to Reality Truth. A filename containing words such as "official" must not create Official Truth. Official Truth may only enter through Official Catalog or explicit official visual reference import paths.
 
 Local hashes, thumbnails, EXIF, dimensions, and coarse classification are ingestion infrastructure. They can prefilter and organize work, but they must not become final product identity.

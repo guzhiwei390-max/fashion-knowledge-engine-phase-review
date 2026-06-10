@@ -21,6 +21,9 @@ from app.catalog import (
     match_official_product,
     match_official_product_by_visual_signature,
     needs_manual_import,
+    parse_batch_official_site_entries_from_csv,
+    parse_batch_official_site_entries_from_json,
+    parse_batch_official_site_entries_from_text,
     require_catalog_ready,
 )
 from app.confidence import HIGH_CONFIDENCE_THRESHOLD, REVIEW_CONFIDENCE_THRESHOLD, evaluate_match_confidence
@@ -339,6 +342,127 @@ def test_official_candidate_review_creates_official_truth(isolated_db, tmp_path)
     assert updated_group["status"] == "confirmed"
 
 
+def test_official_candidate_payload_includes_evidence_and_group_api_approves(isolated_db, tmp_path):
+    image_path = tmp_path / "alo_airlift_official_white_bg.png"
+    image = Image.new("RGB", (820, 820), (250, 250, 250))
+    for x in range(290, 530):
+        for y in range(150, 690):
+            image.putpixel((x, y), (24, 48, 96))
+    image.save(image_path)
+
+    asset = assets.create_asset_record(
+        file_path=image_path,
+        original_name=image_path.name,
+        content_type="image/png",
+        size_bytes=image_path.stat().st_size,
+        batch_id="candidate-group-api-batch",
+    )
+    client = TestClient(app)
+    groups = client.get("/api/official-candidate-groups?status=pending").json()["official_candidate_groups"]
+    group = next(item for item in groups if item["representative_asset_id"] == asset["id"])
+    review = client.get("/api/review-queue?status=pending&reason=official_like_candidate").json()["review_queue"][0]
+    payload = review["review_payload"]
+
+    assert payload["candidate_confidence"] > 0
+    assert payload["candidate_type"] == "official_white_bg_candidate"
+    assert payload["why_this_is_official_like"]
+    assert "related_assets" in payload
+    assert group["related_assets"]
+
+    result = client.post(
+        f"/api/official-candidate-groups/{group['id']}/action",
+        json={
+            "action": "approve",
+            "brand": "Alo",
+            "product_name": "Airlift Jacket",
+            "category": "Women Jackets",
+            "asset_type": "official_white_bg",
+            "resolved_by": "tester",
+        },
+    ).json()
+
+    with database.connect() as conn:
+        product_count = conn.execute("SELECT COUNT(*) AS count FROM official_products").fetchone()["count"]
+        group_row = conn.execute("SELECT * FROM official_candidate_groups WHERE id = ?", (group["id"],)).fetchone()
+
+    assert result["status"] == "group_approved"
+    assert result["confirmed_candidates"] == 1
+    assert product_count == 1
+    assert group_row["status"] == "confirmed"
+
+
+def test_official_candidate_group_reject_merge_and_split_actions(isolated_db):
+    now = database.utc_now()
+    with database.connect() as conn:
+        for asset_id in ("asset-a1", "asset-a2", "asset-b1", "asset-c1"):
+            conn.execute(
+                """
+                INSERT INTO assets (
+                    id, file_uri, original_name, sha256, content_type, size_bytes,
+                    source_type, knowledge_layer, ingestion_metadata, ingestion_status,
+                    asset_type, quality_status, visual_signature, duplicate_status,
+                    product_matching_status, upload_batch_id, created_at
+                )
+                VALUES (?, ?, ?, ?, 'image/png', 1, 'uploaded', 'raw_input', '{}', 'ingested',
+                        'official_like_candidate', 'usable', '{}', 'unique', 'pending', 'group-action-batch', ?)
+                """,
+                (asset_id, f"{asset_id}.png", f"{asset_id}.png", f"sha-{asset_id}", now),
+            )
+        conn.execute(
+            """
+            INSERT INTO official_candidate_groups (
+                id, grouping_key, brand_hint, product_name_hint, candidate_count,
+                representative_asset_id, status, signals_json, created_at, updated_at
+            )
+            VALUES
+              ('group-a', 'group-a-key', 'Alo', 'Jacket A', 2, NULL, 'pending_review', '{}', ?, ?),
+              ('group-b', 'group-b-key', 'Alo', 'Jacket B', 1, NULL, 'pending_review', '{}', ?, ?),
+              ('group-c', 'group-c-key', 'Alo', 'Jacket C', 1, NULL, 'pending_review', '{}', ?, ?)
+            """,
+            (now, now, now, now, now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO official_candidate_assets (
+                id, asset_id, brand_hint, product_name_hint, candidate_type, confidence,
+                status, grouping_key, signals_json, created_at, updated_at
+            )
+            VALUES
+              ('candidate-a1', 'asset-a1', 'Alo', 'Jacket A', 'official_white_bg_candidate', 0.8, 'pending_review', 'group-a-key', '{}', ?, ?),
+              ('candidate-a2', 'asset-a2', 'Alo', 'Jacket A', 'official_white_bg_candidate', 0.8, 'pending_review', 'group-a-key', '{}', ?, ?),
+              ('candidate-b1', 'asset-b1', 'Alo', 'Jacket B', 'official_white_bg_candidate', 0.8, 'pending_review', 'group-b-key', '{}', ?, ?),
+              ('candidate-c1', 'asset-c1', 'Alo', 'Jacket C', 'official_white_bg_candidate', 0.8, 'pending_review', 'group-c-key', '{}', ?, ?)
+            """,
+            (now, now, now, now, now, now, now, now),
+        )
+
+    client = TestClient(app)
+    split = client.post(
+        "/api/official-candidate-groups/group-a/action",
+        json={"action": "split", "candidate_ids": ["candidate-a2"], "new_grouping_key": "group-a-split", "resolved_by": "tester"},
+    ).json()
+    merge = client.post(
+        "/api/official-candidate-groups/group-b/action",
+        json={"action": "merge", "target_group_id": "group-c", "resolved_by": "tester"},
+    ).json()
+    reject = client.post(
+        "/api/official-candidate-groups/group-c/action",
+        json={"action": "reject", "resolved_by": "tester"},
+    ).json()
+
+    with database.connect() as conn:
+        split_candidate = conn.execute("SELECT * FROM official_candidate_assets WHERE id = 'candidate-a2'").fetchone()
+        merged_candidate = conn.execute("SELECT * FROM official_candidate_assets WHERE id = 'candidate-b1'").fetchone()
+        rejected = conn.execute("SELECT * FROM official_candidate_groups WHERE id = 'group-c'").fetchone()
+
+    assert split["status"] == "group_split"
+    assert split_candidate["grouping_key"] == "group-a-split"
+    assert merge["status"] == "group_merged"
+    assert merged_candidate["grouping_key"] == "group-c-key"
+    assert reject["status"] == "group_rejected"
+    assert rejected["status"] == "rejected"
+
+
 def test_corrupted_image_is_stored_without_blocking_batch(isolated_db, tmp_path):
     bad_image = tmp_path / "broken.png"
     bad_image.write_bytes(b"not a real png")
@@ -623,6 +747,68 @@ def test_sitemap_candidates_prioritize_public_catalog_urls():
     assert candidates[0] == "https://shop.example.com/collections/women-jackets"
     assert "https://shop.example.com/products/define-jacket" in candidates
     assert all("other.example.com" not in url for url in candidates)
+
+
+def test_batch_official_site_entry_parsers_support_text_csv_and_json():
+    text_entries = parse_batch_official_site_entries_from_text(
+        "Lululemon, https://shop.lululemon.com/\nAlo, https://www.aloyoga.com/"
+    )
+    csv_entries = parse_batch_official_site_entries_from_csv(
+        "brand,url,type,priority,note\nOn,https://www.on.com/,homepage,high,core brand\n"
+    )
+    json_entries = parse_batch_official_site_entries_from_json(
+        '[{"brand":"Arc\\u0027teryx","urls":["https://arcteryx.com/"],"priority":"high"}]'
+    )
+
+    assert text_entries[0]["brand"] == "Lululemon"
+    assert text_entries[1]["urls"] == ["https://www.aloyoga.com/"]
+    assert csv_entries[0]["priority"] == "high"
+    assert json_entries[0]["brand"] == "Arc'teryx"
+
+
+def test_batch_official_site_learning_endpoint_returns_per_brand_status(isolated_db, monkeypatch):
+    async def fake_bootstrap(url, brand, max_pages=8, category_url=None, product_url=None):
+        return {
+            "brand": brand,
+            "input_url": url,
+            "official_catalog_status": "ready" if brand == "On" else "missing",
+            "product_matching_status": "ready" if brand == "On" else "blocked_missing_official_catalog",
+            "robots_txt_fetched": True,
+            "robots_allowed": True,
+            "robots_url": f"{url.rstrip('/')}/robots.txt",
+            "sitemap_found": brand == "On",
+            "candidate_urls": ["https://www.on.com/products/cloudmonster"] if brand == "On" else [],
+            "parsed_product_pages_count": 1 if brand == "On" else 0,
+            "official_products_created": 1 if brand == "On" else 0,
+            "official_product_assets_created": 1 if brand == "On" else 0,
+            "official_visual_references_created": 1 if brand == "On" else 0,
+            "blocked_reason": "" if brand == "On" else "robots.txt disallows access or could not be verified",
+            "next_best_action": "provide_category_url",
+        }
+
+    monkeypatch.setattr(catalog, "bootstrap_official_catalog", fake_bootstrap)
+    # main imported the function directly, so patch that binding too.
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "bootstrap_official_catalog", fake_bootstrap)
+    client = TestClient(app)
+    response = client.post(
+        "/api/catalog/learn-sites",
+        data={"entries_text": "On, https://www.on.com/\nLululemon, https://shop.lululemon.com/"},
+    )
+
+    payload = response.json()
+    rows = payload["batch_official_site_learning"]
+
+    assert response.status_code == 200
+    assert payload["totals"]["entries_received"] == 2
+    assert payload["totals"]["ready"] == 1
+    assert payload["totals"]["blocked"] == 1
+    assert rows[0]["brand"] == "On"
+    assert rows[0]["official_catalog_status"] == "ready"
+    assert rows[0]["next_action"] == "ready"
+    assert rows[1]["official_catalog_status"] == "blocked"
+    assert rows[1]["next_action"] == "needs_official_candidate_review"
 
 
 def test_official_catalog_bootstrap_can_use_sitemap_candidate(isolated_db, monkeypatch):
@@ -1303,6 +1489,36 @@ def test_low_confidence_match_enters_review_queue(isolated_db, tmp_path, monkeyp
         review = conn.execute("SELECT * FROM review_queue WHERE reason = 'low_confidence'").fetchone()
     assert review is not None
     assert review["confidence"] == pytest.approx(0.72)
+
+
+def test_process_batch_endpoint_only_processes_requested_batch(isolated_db, tmp_path):
+    import_catalog_records([{"brand": "On", "product_name": "Cloudmonster", "category": "Shoes"}])
+    for batch_id, filename, color in (("batch-one", "IMG_one.png", (80, 90, 100)), ("batch-two", "IMG_two.png", (100, 90, 80))):
+        image_path = tmp_path / filename
+        make_solid_image(image_path, color)
+        assets.create_asset_record(
+            file_path=image_path,
+            original_name=filename,
+            content_type="image/png",
+            size_bytes=image_path.stat().st_size,
+            batch_id=batch_id,
+        )
+
+    client = TestClient(app)
+    result = client.post("/api/batches/batch-one/process?limit=10").json()
+
+    with database.connect() as conn:
+        batch_one_jobs = conn.execute(
+            "SELECT COUNT(*) AS count FROM analysis_jobs JOIN assets ON assets.id = analysis_jobs.asset_id WHERE assets.upload_batch_id = 'batch-one' AND analysis_jobs.status = 'completed'"
+        ).fetchone()["count"]
+        batch_two_jobs = conn.execute(
+            "SELECT COUNT(*) AS count FROM analysis_jobs JOIN assets ON assets.id = analysis_jobs.asset_id WHERE assets.upload_batch_id = 'batch-two' AND analysis_jobs.status IN ('queued', 'pending')"
+        ).fetchone()["count"]
+
+    assert result["batch_id"] == "batch-one"
+    assert result["jobs"]["processed"] == 1
+    assert batch_one_jobs == 1
+    assert batch_two_jobs == 1
 
 
 def test_match_evidence_is_returned_for_accepted_match(isolated_db, tmp_path, monkeypatch):
