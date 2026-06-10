@@ -351,17 +351,6 @@ def process_pending_jobs(limit: int = 5000) -> dict[str, Any]:
                     "UPDATE assets SET product_matching_status = ? WHERE id = ?",
                     (MATCHING_BLOCKED_MISSING_CATALOG, job["asset_id"]),
                 )
-                enqueue_review_item(
-                    conn,
-                    item_type="asset",
-                    item_id=job["asset_id"],
-                    reason="unknown",
-                    confidence=0.0,
-                    payload={
-                        "product_matching_status": MATCHING_BLOCKED_MISSING_CATALOG,
-                        "message": "素材已导入。当前缺少官方商品目录，商品身份确认已暂停。请提供品牌官网入口或分类页 URL，系统将自动建立 Official Catalog 后继续匹配。",
-                    },
-                )
                 refresh_batch_progress(conn, job["upload_batch_id"])
                 blocked_missing_official_catalog += 1
                 continue

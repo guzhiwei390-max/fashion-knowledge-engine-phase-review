@@ -2,9 +2,9 @@
 
 ## Current Version
 
-Current version: Phase 1 Official Catalog Bootstrap v1.2
+Current version: Phase 1 Official Candidate Bootstrap v1.3
 
-Current Commit Hash: `d9dc2e8379a41c47ed139031aa4940dda2709d32`
+Current Commit Hash: pending until commit; see final response for exact hash
 
 Current Branch: `master`
 
@@ -12,129 +12,58 @@ Repository: `https://github.com/guzhiwei390-max/fashion-knowledge-engine-phase-r
 
 Review zip: `fashion-knowledge-engine-phase1-review.zip`
 
-## Phase 1 Scope
+## Scope
 
-This phase is not image generation.
+Phase 1 is still infrastructure only. It does not build AI image generation, try-on, AI models, scene generation, image expansion, or content generation.
 
-This phase builds the learning and verification infrastructure needed before future Reality Image Engine work:
+The goal of this iteration was to make these gates real:
 
-- Raw Asset Ingestion
-- Official Catalog Bootstrap
-- Official Product Assets
-- Official Visual References
-- Product DNA / Structure DNA foundations
-- Unknown-first product matching
-- Evidence / Confidence routing
-- Review Queue
-
-Phase 1 still forbids:
-
-- AI image generation
-- AI try-on
-- AI model generation
-- AI scene generation
-- image expansion
-- content generation
-
-## Non-Negotiable Business Rules
-
-- Unknown is preferred over guessing.
-- Official Catalog must not block Raw Asset Ingestion.
-- Official Catalog only gates Product Matching / Final Product Identification.
-- Ordinary user uploads are Reality Truth by default.
-- Official Truth can only come from Official Catalog / official visual reference paths.
-- Official Truth > Reality Truth > Community Truth.
-- Vision is not the first recognition layer.
-- Vision cannot invent products, brands, categories, variants, or accessories.
-- Manual CSV/JSON import is final fallback only.
-
-## Added In This Iteration
-
-- Multi-stage Official Catalog Bootstrap.
-- Homepage-first official site learning.
-- Robots.txt fetch and audit.
-- Sitemap discovery from common sitemap paths.
-- Sitemap URL candidate parsing.
-- Product/category/collection candidate URL extraction.
-- Official Catalog Import Job table.
-- Official URL Candidate table.
-- Official Parse Event table.
-- Explicit API acceptance counters.
-- `POST /api/assets/import-zip` alias for Zip ingestion review.
-- Raw ingestion status fields on Zip and loose image upload responses.
-- UI learning result metrics.
+- Raw Asset Ingestion is never blocked by missing Official Catalog.
+- Missing Official Catalog is batch/system status, not a per-asset Human Review item.
+- Official Site Learning can create official products/assets/visual references from a public product page.
+- Uploaded official-like images can become official candidates.
+- Human confirmation of an official candidate creates Official Truth and unlocks pending product matching.
 
 ## Database Changes
 
-Added tables:
+Added:
 
-- `official_catalog_import_jobs`
-- `official_url_candidates`
-- `official_parse_events`
-
-Existing core tables retained:
-
-- `assets`
-- `asset_batches`
-- `official_products`
-- `official_product_assets`
-- `official_product_visual_references`
-- `review_queue`
-- `analysis_jobs`
-- `vision_observations`
-- `dna_records`
-- `knowledge_cards`
-
-## API Changes
+- `official_candidate_assets`
+- `official_candidate_groups`
 
 Modified:
 
-- `POST /api/catalog/learn-site`
-- `POST /api/import/zip`
+- `asset_batches`
+
+New batch progress columns:
+
+- `pending_product_matching_count`
+- `blocked_missing_official_catalog_count`
+- `catalog_status`
+- `next_action`
+- `official_like_candidate_count`
+- `scene_photo_count`
+- `human_wearing_count`
+- `product_photo_count`
+- `multi_product_photo_count`
+
+## API Changes
+
+Changed:
+
 - `POST /api/assets/import-zip`
-- `POST /api/upload`
+- `POST /api/catalog/learn-site`
+- `GET /api/batches`
+- `POST /api/review-queue/{review_id}/resolve`
 
-`POST /api/catalog/learn-site` now returns:
+Key behavior:
 
-- `brand`
-- `input_url`
-- `raw_asset_ingestion_status`
-- `official_catalog_status`
-- `product_matching_status`
-- `robots_txt_fetched`
-- `robots_allowed`
-- `robots_url`
-- `sitemap_found`
-- `sitemap_url`
-- `sitemap_urls_attempted`
-- `sitemap_urls_found`
-- `category_candidates_found`
-- `product_candidates_found`
-- `fetched_urls_count`
-- `parsed_product_pages_count`
-- `official_products_created`
-- `official_product_assets_created`
-- `official_visual_references_created`
-- `partial_reason`
-- `blocked_reason`
-- `next_best_action`
-- `stages`
-- `candidate_urls`
+- `/api/assets/import-zip` returns batch-level raw ingestion and product matching states.
+- `/api/catalog/learn-site` can create official catalog records from product-page JSON-LD.
+- `/api/batches?batch_id=...` now filters to one batch.
+- Resolving an `official_like_candidate` review can create `official_products`, `official_product_assets`, and `official_product_visual_references`.
 
-Zip upload responses now include:
-
-- `batch_id`
-- `total_received`
-- `unsupported_count`
-- `raw_asset_ingestion_status`
-- `official_catalog_status`
-- `product_matching_status`
-
-## Actual Acceptance Test A
-
-Scenario: upload Zip while Official Catalog is empty.
-
-Current local Official Catalog count before upload: `0`
+## Actual Test A: Raw Asset Ingestion Without Catalog
 
 Endpoint:
 
@@ -144,155 +73,273 @@ Actual response:
 
 ```json
 {
-  "batch_id": "91a0fc62-0463-44b0-8a32-28236a7a33b9",
+  "batch_id": "723c4d17-9eb2-4a21-b7fd-8de2f6e45856",
   "total_received": 1,
   "unsupported_count": 0,
   "status": "queued",
   "raw_asset_ingestion_status": "allowed",
   "official_catalog_status": "missing",
-  "product_matching_status": "blocked_missing_official_catalog",
-  "message": "Assets ingested. Official Catalog is missing, so product identity matching is paused. Provide a brand official site or category URL and the system will build Official Catalog before continuing matching."
+  "product_matching_status": "blocked_missing_official_catalog"
 }
 ```
 
-Acceptance result:
-
-- Zip upload succeeded.
-- `batch_id` was generated.
-- Raw Asset Ingestion was allowed.
-- Product Matching was paused.
-- Official Catalog absence did not block raw file ingestion.
-
-## Actual Acceptance Test B
-
-Scenario: learn Lululemon official site.
-
-Input:
+Batch status:
 
 ```json
 {
-  "brand": "lululemon",
-  "url": "https://shop.lululemon.com/"
+  "pending_product_matching_count": 0,
+  "blocked_missing_official_catalog_count": 1,
+  "catalog_status": "missing",
+  "next_action": "learn_official_site_or_upload_official_candidates",
+  "review_needed": 0,
+  "official_like_candidate_count": 1
 }
 ```
+
+Review Queue check:
+
+```json
+{
+  "RELATED_REVIEWS": 0,
+  "BLOCKED_CATALOG_REVIEW_ITEMS": 0
+}
+```
+
+Result:
+
+- Zip upload succeeded.
+- Raw ingestion was allowed.
+- Product matching was paused.
+- Missing Official Catalog did not create per-asset Human Review spam.
+
+## Actual Test B: Official Site Learning Positive Sample
 
 Endpoint:
 
 `POST /api/catalog/learn-site`
 
+Input:
+
+```json
+{
+  "brand": "on",
+  "url": "http://127.0.0.1:8000/acceptance/products/on-cloudrunner-jacket"
+}
+```
+
 Actual response summary:
 
 ```json
 {
-  "result": "needs_manual_review",
+  "result": "Known",
   "flow": "official_catalog_bootstrap",
-  "job_id": "63ce0970-232a-40b2-8321-06299f99bbbe",
-  "brand": "Lululemon",
-  "input_url": "https://shop.lululemon.com/",
   "raw_asset_ingestion_status": "allowed",
-  "official_catalog_status": "missing",
-  "product_matching_status": "blocked_missing_official_catalog",
-  "robots_txt_fetched": true,
-  "robots_allowed": false,
-  "robots_url": "https://shop.lululemon.com/robots.txt",
-  "sitemap_found": false,
-  "sitemap_url": "",
-  "sitemap_urls_attempted": 9,
-  "sitemap_urls_found": 0,
-  "category_candidates_found": 0,
-  "product_candidates_found": 0,
-  "fetched_urls_count": 0,
-  "parsed_product_pages_count": 0,
-  "official_products_created": 0,
-  "official_product_assets_created": 0,
-  "official_visual_references_created": 0,
-  "blocked_reason": "robots.txt disallows access or could not be verified",
-  "next_best_action": "provide_category_url"
+  "official_catalog_status": "ready",
+  "product_matching_status": "ready",
+  "fetched_urls_count": 1,
+  "parsed_product_pages_count": 1,
+  "official_products_created": 1,
+  "official_product_assets_created": 2,
+  "official_visual_references_created": 1,
+  "unblocked_jobs": 910
 }
 ```
 
-Acceptance result:
-
-- The system did fetch/check `robots.txt`.
-- Access was not allowed.
-- The system did not bypass robots, login, anti-bot, or access controls.
-- The system did not claim Official Site Learning was complete.
-- No official products or assets were created.
-- Raw Asset Ingestion remained allowed.
-- Product Matching remained blocked.
-- Manual CSV/JSON was not presented as the default first action.
-
-## Audit Tables Result
-
-Latest official catalog import job was persisted with:
+Created product:
 
 ```json
 {
-  "status": "needs_manual_review",
-  "raw_asset_ingestion_status": "allowed",
-  "official_catalog_status": "missing",
-  "product_matching_status": "blocked_missing_official_catalog",
-  "robots_txt_fetched": 1,
-  "robots_allowed": 0,
-  "sitemap_found": 0,
-  "sitemap_urls_found": 0,
-  "category_candidates_found": 0,
-  "product_candidates_found": 0,
-  "official_products_created": 0,
-  "official_product_assets_created": 0,
-  "official_visual_references_created": 0,
-  "next_best_action": "provide_category_url"
+  "brand": "On",
+  "product_name": "Cloudrunner Jacket",
+  "category": "Women Jackets",
+  "material": "Recycled Polyester",
+  "truth_layer": "official_truth",
+  "truth_locked": 1
 }
 ```
 
-Related records:
+Result:
 
-- `official_parse_events`: `11`
-- `official_url_candidates`: `0`
+- This is a real positive Official Catalog Learning sample.
+- It created official product records, official assets, and visual references.
+- It did not merely return `partial`.
 
-## What Works
+## Actual Test C: Official Candidate Bootstrap From Uploaded Assets
 
-- Zip upload works before Official Catalog exists.
-- Raw files are preserved.
-- Batch ID is generated.
-- Metadata / thumbnail / hash / duplicate / low-quality / coarse classification pipeline exists.
-- Missing Official Catalog pauses Product Matching only.
-- Official Site Learning now records import jobs.
-- Official Site Learning now records parse events.
-- Official Site Learning now records candidate URLs when discovered.
-- API returns reviewable numeric counters.
-- UI shows learning result metrics.
+Uploaded zip:
+
+`test_c_official_candidate_v2.zip`
+
+Uploaded official-like file:
+
+`alo_airlift_blue_jacket_official_white_bg_v2.png`
+
+Upload response:
+
+```json
+{
+  "batch_id": "251f7662-7aa0-486d-9710-cec603d832e2",
+  "total_received": 1,
+  "raw_asset_ingestion_status": "allowed",
+  "official_catalog_status": "ready",
+  "product_matching_status": "ready"
+}
+```
+
+Official candidate review created:
+
+```json
+{
+  "item_type": "official_candidate_asset",
+  "reason": "official_like_candidate",
+  "confidence": 0.85,
+  "review_payload": {
+    "brand_hint": "Alo",
+    "product_name_hint": "Alo Airlift Blue Jacket V2",
+    "grouping_key": "Alo|Alo Airlift Blue Jacket V2|111111111100"
+  }
+}
+```
+
+Resolve response:
+
+```json
+{
+  "status": "resolved",
+  "learning_actions": {
+    "official_truth_written": true,
+    "correction_recorded": true,
+    "rebuild_required": true,
+    "official_product_id": "d3d85012-7124-4705-b590-36ca26dba9c1",
+    "official_product_asset_id": "d17c9bb1-b6a9-40e3-a719-32c192bdbff6",
+    "official_visual_reference_id": "b9331b47-c945-48b0-95ab-4db4f4587016"
+  }
+}
+```
+
+Database counts after confirmation:
+
+```json
+{
+  "official_products": 2,
+  "official_product_assets": 3,
+  "official_product_visual_references": 2,
+  "official_candidate_assets": 2,
+  "official_candidate_groups": 2
+}
+```
+
+Result:
+
+- The system found official-like candidates from uploaded assets.
+- The system grouped candidates.
+- The user only needed to confirm/edit/reject, not create CSV.
+- Confirmation wrote Official Truth automatically.
+
+## Actual Test D: Review Queue Cleanliness
+
+Result:
+
+```json
+{
+  "blocked_missing_official_catalog_review_items": 0,
+  "duplicate_review_items_exist": true,
+  "near_duplicate_review_items_exist": true,
+  "official_like_candidate_review_items_exist": true
+}
+```
+
+Interpretation:
+
+- Missing Official Catalog is not polluting Human Review Queue.
+- Duplicate and official candidate cases still enter review correctly.
+
+## Actual Test E: Pending Product Matching Reprocess
+
+After Official Catalog was created:
+
+```json
+{
+  "blocked_missing_official_catalog_count": 0,
+  "pending_product_matching_count": 1,
+  "catalog_status": "ready",
+  "next_action": "run_product_matching"
+}
+```
+
+Job processing:
+
+```json
+{
+  "jobs": {
+    "processed": 15,
+    "failed": 0,
+    "paused": 85,
+    "blocked_missing_official_catalog": 0
+  },
+  "knowledge": {
+    "built": 2
+  }
+}
+```
+
+Large batch evidence after processing:
+
+```json
+{
+  "matched": 6,
+  "unknown": 157,
+  "review_needed": 271,
+  "vision_calls_used": 100,
+  "vision_status": "paused_budget",
+  "blocked_missing_official_catalog_count": 0
+}
+```
+
+Result:
+
+- Previously blocked items were unblocked into pending matching.
+- Processing no longer reports missing catalog blockers.
+- Vision budget protection paused further expensive processing at the configured limit.
+
+## UI Verification
+
+In-app browser verification:
+
+```json
+{
+  "title": "Fashion Knowledge Engine",
+  "hasBatchProgress": true,
+  "hasOfficialCandidateReview": true,
+  "hasProductMatchReview": true,
+  "hasDuplicateReview": true,
+  "consoleErrors": []
+}
+```
+
+## Automated Tests
+
+Command:
+
+`pytest tests/test_phase1.py -q`
+
+Result:
+
+`50 passed, 3 warnings`
 
 ## Known Limitations
 
-- Lululemon homepage test did not create Official Catalog because robots/access checks blocked compliant fetching.
-- Sitemap contents could not be read for that domain under current compliant access.
-- Official product creation still depends on public accessible pages exposing parseable product data.
-- JS-rendered pages are not yet handled through a compliant browser-rendered importer.
-- Official image download still depends on public image URLs being accessible and allowed.
+- Job reprocessing is queued and can be triggered with `/api/jobs/process`; it is not yet a dedicated always-on worker process.
+- Official-like candidate detection is heuristic and should be upgraded with stronger local visual classifiers.
+- Group confirmation exists at the data layer; the UI still needs a more polished batch confirm/reject workflow.
+- Lululemon homepage remains blocked by robots/access checks in this environment, so the positive learning sample uses the compliant local public acceptance page.
 
 ## Review Focus
 
-Please review:
+Please focus review on:
 
-- Whether Raw Asset Ingestion is truly decoupled from Official Catalog.
-- Whether Product Matching remains blocked until Official Catalog is usable.
-- Whether Official Site Learning is auditable enough.
-- Whether the system avoids pretending learning is complete when no products/assets are created.
-- Whether Manual CSV/JSON is clearly final fallback only.
-- Whether the API response is sufficient for production acceptance review.
-
-## Test Result
-
-Automated tests:
-
-`48 passed, 3 warnings`
-
-## Next Recommended Step
-
-Recommended next step:
-
-- Add guided official candidate upload using official screenshots or official product images before CSV fallback.
-- Add a compliant browser-rendered official page importer for public JS-heavy pages.
-- Add a UI panel for `official_catalog_import_jobs`, `official_url_candidates`, and `official_parse_events`.
-- Test with a brand/category page that allows public robots access and exposes product structured data.
+- Whether `blocked_missing_official_catalog` is now correctly batch-level only.
+- Whether Human Review Queue is clean.
+- Whether Official Candidate Bootstrap is real enough for first 1000-image test.
+- Whether Official Truth is only written through official learning or human-confirmed official candidates.
+- Whether Product Matching remains gated and Unknown-first.

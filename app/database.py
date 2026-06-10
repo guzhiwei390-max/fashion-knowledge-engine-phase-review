@@ -122,10 +122,19 @@ def init_db() -> None:
                 corrupted INTEGER NOT NULL DEFAULT 0,
                 low_quality INTEGER NOT NULL DEFAULT 0,
                 coarse_classified INTEGER NOT NULL DEFAULT 0,
+                official_like_candidate_count INTEGER NOT NULL DEFAULT 0,
+                scene_photo_count INTEGER NOT NULL DEFAULT 0,
+                human_wearing_count INTEGER NOT NULL DEFAULT 0,
+                product_photo_count INTEGER NOT NULL DEFAULT 0,
+                multi_product_photo_count INTEGER NOT NULL DEFAULT 0,
                 matched INTEGER NOT NULL DEFAULT 0,
                 unknown INTEGER NOT NULL DEFAULT 0,
                 review_needed INTEGER NOT NULL DEFAULT 0,
                 failed INTEGER NOT NULL DEFAULT 0,
+                pending_product_matching_count INTEGER NOT NULL DEFAULT 0,
+                blocked_missing_official_catalog_count INTEGER NOT NULL DEFAULT 0,
+                catalog_status TEXT NOT NULL DEFAULT 'missing',
+                next_action TEXT NOT NULL DEFAULT 'learn_official_site',
                 unsupported_count INTEGER NOT NULL DEFAULT 0,
                 unsupported_files_json TEXT NOT NULL DEFAULT '[]',
                 vision_calls_used INTEGER NOT NULL DEFAULT 0,
@@ -264,6 +273,35 @@ def init_db() -> None:
                 parsed_records INTEGER NOT NULL DEFAULT 0,
                 metadata_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS official_candidate_assets (
+                id TEXT PRIMARY KEY,
+                asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+                brand_hint TEXT NOT NULL DEFAULT 'Unknown',
+                product_name_hint TEXT NOT NULL DEFAULT 'Unknown',
+                candidate_type TEXT NOT NULL DEFAULT 'official_like_candidate',
+                confidence REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'pending_review',
+                grouping_key TEXT NOT NULL DEFAULT '',
+                signals_json TEXT NOT NULL DEFAULT '{}',
+                confirmed_product_id TEXT REFERENCES official_products(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS official_candidate_groups (
+                id TEXT PRIMARY KEY,
+                grouping_key TEXT NOT NULL UNIQUE,
+                brand_hint TEXT NOT NULL DEFAULT 'Unknown',
+                product_name_hint TEXT NOT NULL DEFAULT 'Unknown',
+                candidate_count INTEGER NOT NULL DEFAULT 0,
+                representative_asset_id TEXT REFERENCES assets(id) ON DELETE SET NULL,
+                status TEXT NOT NULL DEFAULT 'pending_review',
+                confirmed_product_id TEXT REFERENCES official_products(id) ON DELETE SET NULL,
+                signals_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS product_aliases (
@@ -655,8 +693,18 @@ def init_db() -> None:
         ensure_column(conn, "asset_batches", "vision_status", "TEXT NOT NULL DEFAULT 'within_budget'")
         ensure_column(conn, "asset_batches", "unsupported_count", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "asset_batches", "unsupported_files_json", "TEXT NOT NULL DEFAULT '[]'")
+        ensure_column(conn, "asset_batches", "pending_product_matching_count", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "asset_batches", "blocked_missing_official_catalog_count", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "asset_batches", "catalog_status", "TEXT NOT NULL DEFAULT 'missing'")
+        ensure_column(conn, "asset_batches", "next_action", "TEXT NOT NULL DEFAULT 'learn_official_site'")
+        ensure_column(conn, "asset_batches", "official_like_candidate_count", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "asset_batches", "scene_photo_count", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "asset_batches", "human_wearing_count", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "asset_batches", "product_photo_count", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "asset_batches", "multi_product_photo_count", "INTEGER NOT NULL DEFAULT 0")
         ensure_reserved_extension_columns(conn)
         seed_source_type_registry(conn)
+        cleanup_system_blocker_review_items(conn)
 
 
 def ensure_reserved_extension_columns(conn: sqlite3.Connection) -> None:
@@ -710,6 +758,17 @@ def seed_source_type_registry(conn: sqlite3.Connection) -> None:
                 now,
             ),
         )
+
+
+def cleanup_system_blocker_review_items(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        DELETE FROM review_queue
+        WHERE status = 'pending'
+          AND reason = 'unknown'
+          AND review_payload LIKE '%blocked_missing_official_catalog%'
+        """
+    )
 
 
 def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:

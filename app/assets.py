@@ -9,7 +9,7 @@ from fastapi import HTTPException, UploadFile
 from PIL import Image, ImageFilter, ImageStat, UnidentifiedImageError
 
 from .classification import coarse_classify_asset
-from .config import ALLOWED_IMAGE_EXTENSIONS, MAX_UPLOAD_BYTES, UPLOAD_DIR, max_vision_calls_per_batch, vision_cost_limit, vision_require_confirm_above
+from .config import ALLOWED_IMAGE_EXTENSIONS, KNOWN_BRANDS, MAX_UPLOAD_BYTES, UPLOAD_DIR, max_vision_calls_per_batch, vision_cost_limit, vision_require_confirm_above
 from .database import connect, decode_json, encode_json, utc_now
 from .pipelines import PIPELINE_INTERNAL_UPLOAD, TRUTH_COMMUNITY, TRUTH_OFFICIAL, TRUTH_REALITY
 from .review import enqueue_review_item
@@ -203,17 +203,14 @@ def create_asset_record(
                 """,
                 (str(uuid.uuid4()), asset_id, job_status, now),
             )
-            if product_matching_status == MATCHING_BLOCKED_MISSING_CATALOG:
-                enqueue_review_item(
+            if classification["asset_type"] == "official_like_candidate":
+                create_official_candidate_asset(
                     conn,
-                    item_type="asset",
-                    item_id=asset_id,
-                    reason="unknown",
-                    confidence=0.0,
-                    payload={
-                        "product_matching_status": MATCHING_BLOCKED_MISSING_CATALOG,
-                        "message": "Assets ingested. Official Catalog is missing, so product identity matching is paused.",
-                    },
+                    asset_id=asset_id,
+                    original_name=original_name,
+                    classification=classification,
+                    metadata=metadata,
+                    visual_signature=visual_signature,
                 )
             if classification["asset_type"] == "multi_product_photo":
                 create_reserved_product_region(conn, asset_id)
@@ -221,7 +218,7 @@ def create_asset_record(
                     conn,
                     item_type="asset",
                     item_id=asset_id,
-                    reason="low_confidence",
+                    reason="multi_product_uncertain",
                     confidence=0.0,
                     payload={"asset_type": "multi_product_photo", "message": "Multi-product photo requires product region review."},
                 )
@@ -485,6 +482,126 @@ def create_reserved_product_region(conn, asset_id: str) -> None:
     )
 
 
+def create_official_candidate_asset(
+    conn,
+    *,
+    asset_id: str,
+    original_name: str,
+    classification: dict[str, Any],
+    metadata: dict[str, Any],
+    visual_signature: dict[str, Any],
+) -> dict[str, Any]:
+    now = utc_now()
+    brand_hint = brand_hint_from_name(original_name)
+    product_hint = product_hint_from_name(original_name)
+    grouping_key = official_candidate_grouping_key(brand_hint, product_hint, visual_signature)
+    candidate_id = str(uuid.uuid4())
+    signals = {
+        "classification_signals": classification.get("signals", []),
+        "content_signals": metadata.get("content_signals", {}),
+        "original_name": original_name,
+    }
+    conn.execute(
+        """
+        INSERT INTO official_candidate_assets (
+            id, asset_id, brand_hint, product_name_hint, candidate_type, confidence,
+            status, grouping_key, signals_json, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, 'official_like_candidate', ?, 'pending_review', ?, ?, ?, ?)
+        """,
+        (
+            candidate_id,
+            asset_id,
+            brand_hint,
+            product_hint,
+            official_candidate_confidence(classification, metadata),
+            grouping_key,
+            encode_json(signals),
+            now,
+            now,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO official_candidate_groups (
+            id, grouping_key, brand_hint, product_name_hint, candidate_count,
+            representative_asset_id, status, signals_json, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, 1, ?, 'pending_review', ?, ?, ?)
+        ON CONFLICT(grouping_key) DO UPDATE SET
+            candidate_count = candidate_count + 1,
+            representative_asset_id = COALESCE(official_candidate_groups.representative_asset_id, excluded.representative_asset_id),
+            brand_hint = CASE
+                WHEN official_candidate_groups.brand_hint = 'Unknown' THEN excluded.brand_hint
+                ELSE official_candidate_groups.brand_hint
+            END,
+            product_name_hint = CASE
+                WHEN official_candidate_groups.product_name_hint = 'Unknown' THEN excluded.product_name_hint
+                ELSE official_candidate_groups.product_name_hint
+            END,
+            updated_at = excluded.updated_at
+        """,
+        (
+            str(uuid.uuid4()),
+            grouping_key,
+            brand_hint,
+            product_hint,
+            asset_id,
+            encode_json(signals),
+            now,
+            now,
+        ),
+    )
+    enqueue_review_item(
+        conn,
+        item_type="official_candidate_asset",
+        item_id=candidate_id,
+        reason="official_like_candidate",
+        confidence=official_candidate_confidence(classification, metadata),
+        payload={
+            "asset_id": asset_id,
+            "brand_hint": brand_hint,
+            "product_name_hint": product_hint,
+            "candidate_type": "official_like_candidate",
+            "grouping_key": grouping_key,
+            "message": "Official-like candidate found in uploaded materials. Confirm to create Official Truth.",
+        },
+    )
+    return {"id": candidate_id, "asset_id": asset_id, "grouping_key": grouping_key}
+
+
+def official_candidate_confidence(classification: dict[str, Any], metadata: dict[str, Any]) -> float:
+    signals = classification.get("signals", [])
+    content = metadata.get("content_signals", {})
+    score = 0.55
+    if "content_official_like_white_background" in signals:
+        score += 0.25
+    if "official_like_filename" in signals:
+        score += 0.2
+    if content.get("white_background"):
+        score += 0.1
+    return min(0.95, round(score, 4))
+
+
+def brand_hint_from_name(filename: str) -> str:
+    normalized = filename.lower().replace("-", " ").replace("_", " ")
+    for key, brand in KNOWN_BRANDS.items():
+        if key in normalized:
+            return brand
+    return "Unknown"
+
+
+def product_hint_from_name(filename: str) -> str:
+    stem = Path(filename).stem.replace("-", " ").replace("_", " ").strip()
+    cleaned = " ".join(part for part in stem.split() if part.lower() not in {"official", "white", "bg", "model", "detail", "image", "img"})
+    return cleaned.title() if cleaned else "Unknown"
+
+
+def official_candidate_grouping_key(brand_hint: str, product_hint: str, visual_signature: dict[str, Any]) -> str:
+    ahash = visual_signature.get("ahash", "")[:12] if isinstance(visual_signature, dict) else ""
+    return "|".join([brand_hint or "Unknown", product_hint or "Unknown", ahash])
+
+
 def refresh_batch_progress(conn, batch_id: str) -> None:
     ensure_batch_record(conn, batch_id)
     asset_rows = conn.execute("SELECT * FROM assets WHERE upload_batch_id = ?", (batch_id,)).fetchall()
@@ -493,6 +610,11 @@ def refresh_batch_progress(conn, batch_id: str) -> None:
     corrupted = sum(1 for row in asset_rows if row["ingestion_status"] == "corrupted")
     low_quality = sum(1 for row in asset_rows if row["quality_status"] == "low_quality")
     coarse_classified = sum(1 for row in asset_rows if row["asset_type"] != "unknown")
+    official_like_candidate_count = sum(1 for row in asset_rows if row["asset_type"] == "official_like_candidate")
+    scene_photo_count = sum(1 for row in asset_rows if row["asset_type"] == "scene_photo")
+    human_wearing_count = sum(1 for row in asset_rows if row["asset_type"] == "human_wearing_photo")
+    product_photo_count = sum(1 for row in asset_rows if row["asset_type"] == "reality_product_photo")
+    multi_product_photo_count = sum(1 for row in asset_rows if row["asset_type"] == "multi_product_photo")
     failed_row = conn.execute(
         """
         SELECT COUNT(*) AS count
@@ -539,6 +661,33 @@ def refresh_batch_progress(conn, batch_id: str) -> None:
         """,
         (batch_id, batch_id),
     ).fetchone()
+    pending_matching_row = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM assets
+        WHERE upload_batch_id = ? AND product_matching_status = 'pending'
+        """,
+        (batch_id,),
+    ).fetchone()
+    blocked_catalog_row = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM assets
+        WHERE upload_batch_id = ? AND product_matching_status = 'blocked_missing_official_catalog'
+        """,
+        (batch_id,),
+    ).fetchone()
+    catalog_ready = conn.execute("SELECT COUNT(*) AS count FROM official_products").fetchone()["count"] > 0
+    blocked_count = int(blocked_catalog_row["count"])
+    pending_count = int(pending_matching_row["count"])
+    catalog_status = "ready" if catalog_ready else "missing"
+    next_action = (
+        "run_product_matching"
+        if catalog_ready and pending_count
+        else "learn_official_site_or_upload_official_candidates"
+        if blocked_count
+        else "none"
+    )
     vision_row = conn.execute(
         """
         SELECT COUNT(*) AS count
@@ -557,8 +706,12 @@ def refresh_batch_progress(conn, batch_id: str) -> None:
         """
         UPDATE asset_batches
         SET status = ?, total_files = ?, ingested = ?, duplicated = ?, corrupted = ?,
-            low_quality = ?, coarse_classified = ?, matched = ?, unknown = ?,
-            review_needed = ?, failed = ?, vision_calls_used = ?, openai_vision_calls_used = ?,
+            low_quality = ?, coarse_classified = ?, official_like_candidate_count = ?,
+            scene_photo_count = ?, human_wearing_count = ?, product_photo_count = ?,
+            multi_product_photo_count = ?, matched = ?, unknown = ?,
+            review_needed = ?, failed = ?, pending_product_matching_count = ?,
+            blocked_missing_official_catalog_count = ?, catalog_status = ?, next_action = ?,
+            vision_calls_used = ?, openai_vision_calls_used = ?,
             estimated_cost = ?,
             vision_status = CASE
                 WHEN ? >= max_vision_calls_per_batch OR ? >= cost_limit THEN 'paused_budget'
@@ -575,10 +728,19 @@ def refresh_batch_progress(conn, batch_id: str) -> None:
             corrupted,
             low_quality,
             coarse_classified,
+            official_like_candidate_count,
+            scene_photo_count,
+            human_wearing_count,
+            product_photo_count,
+            multi_product_photo_count,
             int(matched_row["count"]),
             int(unknown_row["count"]) + corrupted,
             int(review_row["count"]),
             int(failed_row["count"]),
+            pending_count,
+            blocked_count,
+            catalog_status,
+            next_action,
             int(vision_row["count"]),
             int(vision_row["count"]),
             round(int(vision_row["count"]) * 0.002, 6),

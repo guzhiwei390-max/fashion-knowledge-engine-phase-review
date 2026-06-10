@@ -810,7 +810,11 @@ def import_catalog_tree_from_html_pages(
         if not same_site(root_url, page_url):
             continue
         extracted = extract_catalog_records_from_html(html, brand, page_url)
-        if extracted["page_type"] == "catalog_page" or looks_like_category_url(page_url):
+        if (
+            extracted["page_type"] in {"catalog_page", "product_page"}
+            or looks_like_category_url(page_url)
+            or looks_like_product_url(page_url)
+        ):
             records.extend(extracted["records"])
         visited += 1
     records = dedupe_catalog_records(records)

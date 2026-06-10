@@ -1,10 +1,28 @@
 import uuid
+import shutil
+from pathlib import Path
 from typing import Any
 
+from .config import DATA_DIR
 from .database import decode_json, encode_json, utc_now
+from .unknown import UNKNOWN
+from .visual import encode_signature_for_db, image_signature
 
 
-REVIEW_REASONS = {"unknown", "low_confidence", "conflict", "duplicate", "near_duplicate"}
+REVIEW_REASONS = {
+    "unknown",
+    "low_confidence",
+    "conflict",
+    "duplicate",
+    "near_duplicate",
+    "multi_product_uncertain",
+    "low_quality_but_possibly_useful",
+    "official_like_candidate",
+    "official_candidate_review",
+    "conflict_after_matching",
+    "low_confidence_after_matching",
+    "uncertain_product_identity",
+}
 ASSET_RESOLUTION_FIELDS = {"asset_type", "quality_status", "duplicate_status"}
 
 
@@ -127,6 +145,7 @@ def resolve_review_item(
 def apply_review_resolution(conn, review: dict[str, Any], resolution: dict[str, Any], resolved_by: str) -> dict[str, Any]:
     actions = {
         "asset_updated": False,
+        "official_truth_written": False,
         "reality_truth_written": False,
         "correction_recorded": False,
         "rebuild_required": False,
@@ -186,7 +205,162 @@ def apply_review_resolution(conn, review: dict[str, Any], resolution: dict[str, 
             actions["reality_truth_written"] = True
             actions["correction_recorded"] = True
             actions["rebuild_required"] = True
+    if item_type == "official_candidate_asset":
+        official_result = confirm_official_candidate_asset(conn, item_id, resolution, resolved_by)
+        if official_result.get("status") == "official_truth_created":
+            actions["official_truth_written"] = True
+            actions["correction_recorded"] = True
+            actions["rebuild_required"] = True
+            actions["official_product_id"] = official_result["product_id"]
+            actions["official_product_asset_id"] = official_result["official_product_asset_id"]
+            actions["official_visual_reference_id"] = official_result["official_visual_reference_id"]
     return actions
+
+
+def confirm_official_candidate_asset(conn, candidate_id: str, resolution: dict[str, Any], resolved_by: str) -> dict[str, Any]:
+    candidate = conn.execute("SELECT * FROM official_candidate_assets WHERE id = ?", (candidate_id,)).fetchone()
+    if not candidate:
+        return {"result": "Unknown", "unknown": ["official_candidate_asset"]}
+    asset = conn.execute("SELECT * FROM assets WHERE id = ?", (candidate["asset_id"],)).fetchone()
+    if not asset:
+        return {"result": "Unknown", "unknown": ["asset"]}
+
+    brand = str(resolution.get("brand") or candidate["brand_hint"] or UNKNOWN).strip() or UNKNOWN
+    product_name = str(resolution.get("product_name") or candidate["product_name_hint"] or UNKNOWN).strip() or UNKNOWN
+    category = str(resolution.get("category") or "Unknown").strip() or UNKNOWN
+    if brand == UNKNOWN or product_name == UNKNOWN:
+        return {"result": "Unknown", "unknown": ["brand", "product_name"]}
+
+    now = utc_now()
+    existing = conn.execute(
+        "SELECT * FROM official_products WHERE brand = ? AND product_name = ?",
+        (brand, product_name),
+    ).fetchone()
+    product_id = existing["id"] if existing else str(uuid.uuid4())
+    aliases = [product_name]
+    official_fields = {
+        "brand": brand,
+        "product_name": product_name,
+        "category": category,
+        "source": "official_candidate_review",
+        "reviewed_by": resolved_by,
+        "candidate_asset_id": candidate_id,
+    }
+    conn.execute(
+        """
+        INSERT INTO official_products (
+            id, brand, product_name, product_family, variant, aliases, category, description,
+            colors, material, official_url, import_type, official_fields_json, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'official_candidate_review', ?, ?, ?)
+        ON CONFLICT(brand, product_name) DO UPDATE SET
+            category = excluded.category,
+            import_type = excluded.import_type,
+            official_fields_json = excluded.official_fields_json,
+            updated_at = excluded.updated_at
+        """,
+        (
+            product_id,
+            brand,
+            product_name,
+            str(resolution.get("product_family", UNKNOWN) or UNKNOWN),
+            str(resolution.get("variant", UNKNOWN) or UNKNOWN),
+            encode_json(aliases),
+            category,
+            str(resolution.get("description", UNKNOWN) or UNKNOWN),
+            encode_json([value for value in [resolution.get("color")] if value]),
+            str(resolution.get("material", UNKNOWN) or UNKNOWN),
+            str(resolution.get("official_url", asset["file_uri"]) or asset["file_uri"]),
+            encode_json(official_fields),
+            now,
+            now,
+        ),
+    )
+    asset_type = str(resolution.get("asset_type") or "official_white_bg")
+    reference_id = str(uuid.uuid4())
+    source_path = Path(asset["file_uri"])
+    suffix = source_path.suffix or ".jpg"
+    destination = DATA_DIR / "official_refs" / product_id / f"{reference_id}{suffix}"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_path, destination)
+    signature = image_signature(str(destination))
+    conn.execute(
+        """
+        INSERT INTO official_product_assets (
+            id, product_id, asset_type, uri, local_file_uri, visual_signature, import_type, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, 'official_candidate_review', ?)
+        """,
+        (
+            reference_id,
+            product_id,
+            asset_type,
+            asset["file_uri"],
+            str(destination),
+            encode_signature_for_db(signature),
+            now,
+        ),
+    )
+    visual_reference_id = str(uuid.uuid4())
+    conn.execute(
+        """
+        INSERT INTO official_product_visual_references (
+            id, product_id, official_product_asset_id, asset_type,
+            local_file_uri, visual_signature, structure_json, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, '{}', ?)
+        """,
+        (
+            visual_reference_id,
+            product_id,
+            reference_id,
+            asset_type,
+            str(destination),
+            encode_signature_for_db(signature),
+            now,
+        ),
+    )
+    conn.execute(
+        """
+        UPDATE official_candidate_assets
+        SET status = 'confirmed',
+            confirmed_product_id = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (product_id, now, candidate_id),
+    )
+    conn.execute(
+        """
+        UPDATE official_candidate_groups
+        SET status = 'confirmed',
+            confirmed_product_id = ?,
+            updated_at = ?
+        WHERE grouping_key = ?
+        """,
+        (product_id, now, candidate["grouping_key"]),
+    )
+    conn.execute(
+        """
+        UPDATE assets
+        SET product_matching_status = 'pending'
+        WHERE product_matching_status = 'blocked_missing_official_catalog'
+        """
+    )
+    conn.execute(
+        """
+        UPDATE analysis_jobs
+        SET status = 'queued', error_message = NULL
+        WHERE status = 'blocked_missing_official_catalog'
+        """
+    )
+    record_human_correction(conn, "official_candidate_asset", candidate_id, "official_product", UNKNOWN, f"{brand} / {product_name}", resolved_by)
+    return {
+        "status": "official_truth_created",
+        "product_id": product_id,
+        "official_product_asset_id": reference_id,
+        "official_visual_reference_id": visual_reference_id,
+    }
 
 
 def record_human_correction(

@@ -244,3 +244,53 @@ OfficialProductDNA can be supplemented only by official evidence. RealityProduct
 Resolving a Review Queue item must create auditable learning evidence.
 
 At minimum, a resolution should update the target label or observation when provided, record a human correction, store the correction reason, mark that rebuild is required, and keep the source as Reality Truth unless the correction came through an official-only import path.
+
+## System Blockers Are Not Human Review Items
+
+`blocked_missing_official_catalog` is a batch-level or system-level blocker.
+
+It must be shown in Batch Progress / Batch Status through:
+
+- `pending_product_matching_count`
+- `blocked_missing_official_catalog_count`
+- `catalog_status`
+- `next_action`
+
+It must not create one Human Review Queue item per asset.
+
+Human Review Queue is reserved for true human judgment:
+
+- duplicate
+- near duplicate
+- official-like candidate
+- official candidate review
+- multi-product uncertainty
+- low confidence after matching
+- conflict after matching
+- uncertain product identity after catalog exists
+- low quality but possibly useful
+
+This keeps the queue useful during 1,000 to 10,000 image imports.
+
+## Official Candidate Bootstrap Before Manual CSV
+
+When public official site learning cannot create enough Official Catalog data, the system should next bootstrap from official-like candidates.
+
+Allowed candidate sources:
+
+- official-looking images inside user-uploaded zip files
+- official white-background product images
+- official model images
+- official detail images
+- official product-page screenshots
+- official-like assets explicitly uploaded by the user
+
+The system should:
+
+1. Coarsely classify official-like candidates.
+2. Group them by brand hint, product hint, and visual similarity.
+3. Send candidate groups to human confirmation.
+4. Create `official_products`, `official_product_assets`, and `official_product_visual_references` after confirmation.
+5. Requeue pending product matching.
+
+CSV/JSON manual import remains the final fallback, not the default workflow.

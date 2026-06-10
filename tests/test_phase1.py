@@ -81,6 +81,8 @@ def test_pipeline_schema_is_reserved_without_enabling_external_ingestion(isolate
         "official_catalog_import_jobs",
         "official_url_candidates",
         "official_parse_events",
+        "official_candidate_assets",
+        "official_candidate_groups",
     }.issubset(tables)
     assert {"pipeline_type", "truth_layer", "source_id", "external_ref_uri", "ingestion_metadata"}.issubset(asset_columns)
     assert {"product_family", "variant", "truth_layer", "truth_locked", "official_fields_json", "supplemental_fields_json"}.issubset(product_columns)
@@ -203,9 +205,14 @@ def test_zip_ingestion_is_allowed_without_official_catalog(isolated_db):
     with database.connect() as conn:
         asset = conn.execute("SELECT * FROM assets WHERE upload_batch_id = ?", (payload["batch_id"],)).fetchone()
         job = conn.execute("SELECT * FROM analysis_jobs WHERE asset_id = ?", (asset["id"],)).fetchone()
+        review = conn.execute("SELECT * FROM review_queue WHERE item_id = ?", (asset["id"],)).fetchone()
+        batch = conn.execute("SELECT * FROM asset_batches WHERE id = ?", (payload["batch_id"],)).fetchone()
     assert asset["truth_layer"] == TRUTH_REALITY
     assert asset["product_matching_status"] == "blocked_missing_official_catalog"
     assert job["status"] == "blocked_missing_official_catalog"
+    assert review is None
+    assert batch["blocked_missing_official_catalog_count"] == 1
+    assert batch["catalog_status"] == "missing"
 
 
 def test_assets_import_zip_alias_returns_ingestion_statuses(isolated_db):
@@ -247,8 +254,11 @@ def test_process_jobs_marks_identity_blocked_without_catalog(isolated_db, tmp_pa
     with database.connect() as conn:
         stored = conn.execute("SELECT * FROM assets WHERE id = ?", (asset["id"],)).fetchone()
         review = conn.execute("SELECT * FROM review_queue WHERE item_id = ?", (asset["id"],)).fetchone()
+        batch = conn.execute("SELECT * FROM asset_batches WHERE id = 'no-catalog-batch'").fetchone()
     assert stored["product_matching_status"] == "blocked_missing_official_catalog"
-    assert review is not None
+    assert review is None
+    assert batch["blocked_missing_official_catalog_count"] == 1
+    assert batch["next_action"] == "learn_official_site_or_upload_official_candidates"
 
 
 def test_user_upload_filename_cannot_create_official_truth(isolated_db, tmp_path):
@@ -266,6 +276,67 @@ def test_user_upload_filename_cannot_create_official_truth(isolated_db, tmp_path
     assert asset["source_type"] == "uploaded"
     assert asset["truth_layer"] == TRUTH_REALITY
     assert asset["asset_type"] != "official_product_image"
+
+
+def test_official_candidate_review_creates_official_truth(isolated_db, tmp_path):
+    image_path = tmp_path / "lululemon_define_official_white_bg.png"
+    image = Image.new("RGB", (800, 800), (250, 250, 250))
+    for x in range(300, 500):
+        for y in range(170, 650):
+            image.putpixel((x, y), (35, 35, 35))
+    image.save(image_path)
+
+    asset = assets.create_asset_record(
+        file_path=image_path,
+        original_name=image_path.name,
+        content_type="image/png",
+        size_bytes=image_path.stat().st_size,
+        batch_id="official-candidate-batch",
+    )
+
+    with database.connect() as conn:
+        candidate = conn.execute("SELECT * FROM official_candidate_assets WHERE asset_id = ?", (asset["id"],)).fetchone()
+        group = conn.execute(
+            "SELECT * FROM official_candidate_groups WHERE grouping_key = ?",
+            (candidate["grouping_key"],),
+        ).fetchone()
+        review = conn.execute(
+            "SELECT * FROM review_queue WHERE item_type = 'official_candidate_asset' AND item_id = ?",
+            (candidate["id"],),
+        ).fetchone()
+        from app.review import resolve_review_item
+
+        result = resolve_review_item(
+            conn,
+            review_id=review["id"],
+            resolution={
+                "brand": "Lululemon",
+                "product_name": "Define Jacket",
+                "category": "Women Jackets",
+                "asset_type": "official_white_bg",
+                "correction_reason": "confirmed official-like white background candidate",
+            },
+            resolved_by="tester",
+        )
+        product_count = conn.execute("SELECT COUNT(*) AS count FROM official_products").fetchone()["count"]
+        official_asset_count = conn.execute("SELECT COUNT(*) AS count FROM official_product_assets").fetchone()["count"]
+        visual_count = conn.execute("SELECT COUNT(*) AS count FROM official_product_visual_references").fetchone()["count"]
+        stored_asset = conn.execute("SELECT * FROM assets WHERE id = ?", (asset["id"],)).fetchone()
+        updated_group = conn.execute(
+            "SELECT * FROM official_candidate_groups WHERE grouping_key = ?",
+            (candidate["grouping_key"],),
+        ).fetchone()
+
+    assert candidate is not None
+    assert group is not None
+    assert group["candidate_count"] == 1
+    assert review is not None
+    assert result["learning_actions"]["official_truth_written"] is True
+    assert product_count == 1
+    assert official_asset_count == 1
+    assert visual_count == 1
+    assert stored_asset["product_matching_status"] == "pending"
+    assert updated_group["status"] == "confirmed"
 
 
 def test_corrupted_image_is_stored_without_blocking_batch(isolated_db, tmp_path):
@@ -516,6 +587,25 @@ def test_category_tree_import_collects_same_site_category_pages(isolated_db):
     assert result["pages_read"] == 2
     assert result["imported"] == 3
     assert catalog_count() == 3
+
+
+def test_catalog_import_accepts_public_product_page_url(isolated_db):
+    product_url = "https://shop.example.com/products/cloudrunner-jacket"
+    pages = {
+        product_url: """
+        <html><body>
+          <script type="application/ld+json">
+          {"@type":"Product","name":"On Cloudrunner Jacket","brand":"On","category":"Women Jackets","image":"https://shop.example.com/cloudrunner.jpg","url":"https://shop.example.com/products/cloudrunner-jacket"}
+          </script>
+        </body></html>
+        """,
+    }
+
+    result = import_catalog_tree_from_html_pages(pages, product_url, "On", max_pages=1)
+
+    assert result["import_type"] == "catalog_tree_import"
+    assert result["imported"] == 1
+    assert catalog_count() == 1
 
 
 def test_sitemap_candidates_prioritize_public_catalog_urls():

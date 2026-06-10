@@ -8,6 +8,7 @@ COARSE_ASSET_TYPES = {
     "official_product_image",
     "official_model_image",
     "official_detail_image",
+    "official_like_candidate",
     "reality_product_photo",
     "human_wearing_photo",
     "scene_photo",
@@ -68,6 +69,11 @@ def coarse_classify_asset(
         return {"asset_type": "scene_photo", "quality_status": quality_status, "signals": ["content_scene_like"]}
     if any(marker in normalized for marker in ("outfit", "style", "look")):
         return {"asset_type": "outfit_reference", "quality_status": quality_status, "signals": ["outfit_marker"]}
+    official_name_markers = ("official", "website", "product_page", "catalog", "white_bg", "white_background")
+    if any(marker in normalized for marker in official_name_markers):
+        return {"asset_type": "official_like_candidate", "quality_status": quality_status, "signals": ["official_like_filename"]}
+    if content.get("white_background") and not content.get("human_like") and not content.get("scene_like"):
+        return {"asset_type": "official_like_candidate", "quality_status": quality_status, "signals": ["content_official_like_white_background"]}
     if content.get("detail_like"):
         return {"asset_type": "official_detail_image" if source_type == "official_visual_reference" else "reality_product_photo", "quality_status": quality_status, "signals": ["content_detail_like"]}
     if content.get("white_background"):

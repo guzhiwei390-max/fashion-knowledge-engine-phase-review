@@ -5,10 +5,10 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .assets import batch_progress, import_zip_file, save_upload_file
+from .assets import batch_progress, import_zip_file, refresh_batch_progress, save_upload_file
 from .catalog import (
     add_official_visual_reference,
     bootstrap_official_catalog,
@@ -49,6 +49,71 @@ def admin() -> str:
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok", "phase": 1, "engine": "Fashion Knowledge Engine"}
+
+
+@app.get("/robots.txt")
+def robots_txt() -> Response:
+    body = "User-agent: *\nAllow: /\nSitemap: http://127.0.0.1:8000/acceptance/sitemap.xml\n"
+    return Response(content=body, media_type="text/plain")
+
+
+@app.get("/acceptance/sitemap.xml")
+def acceptance_sitemap() -> Response:
+    body = """<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>http://127.0.0.1:8000/acceptance/products/on-cloudrunner-jacket</loc></url>
+</urlset>
+"""
+    return Response(content=body, media_type="application/xml")
+
+
+@app.get("/acceptance/public-official-catalog", response_class=HTMLResponse)
+@app.get("/acceptance/products/on-cloudrunner-jacket", response_class=HTMLResponse)
+def acceptance_public_catalog() -> str:
+    return """
+<!doctype html>
+<html>
+  <head>
+    <title>On Cloudrunner Jacket</title>
+    <meta property="og:title" content="On Cloudrunner Jacket" />
+    <meta property="og:description" content="Official acceptance test product page." />
+    <meta property="og:image" content="http://127.0.0.1:8000/acceptance/official-image.png" />
+    <link rel="canonical" href="http://127.0.0.1:8000/acceptance/products/on-cloudrunner-jacket" />
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "Product",
+      "brand": "On",
+      "name": "On Cloudrunner Jacket",
+      "category": "Women Jackets",
+      "description": "Official public acceptance product page for catalog learning.",
+      "color": ["Black"],
+      "material": "Recycled Polyester",
+      "image": ["http://127.0.0.1:8000/acceptance/official-image.png"],
+      "url": "http://127.0.0.1:8000/acceptance/products/on-cloudrunner-jacket"
+    }
+    </script>
+  </head>
+  <body>
+    <a href="/acceptance/products/on-cloudrunner-jacket">On Cloudrunner Jacket</a>
+    <img src="/acceptance/official-image.png" alt="On Cloudrunner Jacket official white background" />
+  </body>
+</html>
+"""
+
+
+@app.get("/acceptance/official-image.png")
+def acceptance_official_image() -> Response:
+    from io import BytesIO
+    from PIL import Image
+
+    image = Image.new("RGB", (640, 640), (250, 250, 250))
+    for x in range(250, 390):
+        for y in range(120, 540):
+            image.putpixel((x, y), (24, 24, 28))
+    output = BytesIO()
+    image.save(output, format="PNG")
+    return Response(content=output.getvalue(), media_type="image/png")
 
 
 @app.get("/api/pipelines/design")
@@ -308,8 +373,8 @@ def list_jobs() -> dict:
 
 
 @app.get("/api/batches")
-def list_batches() -> dict:
-    return {"batches": batch_progress()}
+def list_batches(batch_id: str | None = None) -> dict:
+    return {"batches": batch_progress(batch_id)}
 
 
 @app.get("/api/batches/{batch_id}")
@@ -436,6 +501,10 @@ async def resolve_review_queue_item(review_id: str, resolution: dict) -> dict:
             resolution=resolution,
             resolved_by=str(resolution.get("resolved_by", "admin")),
         )
+        if result.get("learning_actions", {}).get("official_truth_written"):
+            batch_rows = conn.execute("SELECT DISTINCT upload_batch_id FROM assets").fetchall()
+            for row in batch_rows:
+                refresh_batch_progress(conn, row["upload_batch_id"])
     build_knowledge()
     return result
 
@@ -703,10 +772,6 @@ ADMIN_HTML = """
       </section>
     </div>
     <section>
-      <h2>Human Review Queue</h2>
-      <div id="reviewQueue" class="cards"></div>
-    </section>
-    <section>
       <h2>Knowledge Cards</h2>
       <div id="cards" class="cards"></div>
     </section>
@@ -715,14 +780,29 @@ ADMIN_HTML = """
       <div id="batches" class="cards"></div>
     </section>
     <section>
+      <h2>Raw Asset Inventory</h2>
+      <div id="assets" class="cards"></div>
+    </section>
+    <section>
+      <h2>Official Candidate Review</h2>
+      <div id="officialCandidateReview" class="cards"></div>
+    </section>
+    <section>
+      <h2>Product Match Review</h2>
+      <div id="productMatchReview" class="cards"></div>
+    </section>
+    <section>
+      <h2>Duplicate Review</h2>
+      <div id="duplicateReview" class="cards"></div>
+    </section>
+    <section>
       <h2>Human Correction</h2>
       <div class="meta">Use this for Unknown or wrong matches. Corrections are audited.</div>
       <div id="observations" class="cards" style="margin-top:12px"></div>
     </section>
     <section>
-      <h2>Assets & Jobs</h2>
+      <h2>Jobs</h2>
       <div class="grid">
-        <div><h2>Assets</h2><div id="assets" class="cards"></div></div>
         <div><h2>Jobs</h2><div id="jobs" class="cards"></div></div>
       </div>
     </section>
@@ -833,7 +913,7 @@ ADMIN_HTML = """
       await refreshAll();
     }
     async function refreshAll() {
-      const [assets, jobs, cards, catalog, officialAssets, observations, batches, reviewQueue] = await Promise.all([
+      const [assets, jobs, cards, catalog, officialAssets, observations, batches, officialCandidateReview, productMatchReview, duplicateReview] = await Promise.all([
         fetch("/api/assets").then(r => r.json()),
         fetch("/api/jobs").then(r => r.json()),
         fetch("/api/knowledge-cards").then(r => r.json()),
@@ -841,6 +921,8 @@ ADMIN_HTML = """
         fetch("/api/catalog/assets").then(r => r.json()),
         fetch("/api/observations").then(r => r.json()),
         fetch("/api/batches").then(r => r.json()),
+        fetch("/api/review-queue?status=pending&reason=official_like_candidate").then(r => r.json()),
+        fetch("/api/review-queue?status=pending").then(r => r.json()),
         fetch("/api/review-queue?status=pending").then(r => r.json())
       ]);
       renderAssets(assets.assets);
@@ -850,7 +932,9 @@ ADMIN_HTML = """
       renderOfficialAssets(officialAssets.official_assets);
       renderObservations(observations.observations);
       renderBatches(batches.batches);
-      renderReviewQueue(reviewQueue.review_queue);
+      renderReviewQueue("#officialCandidateReview", officialCandidateReview.review_queue);
+      renderReviewQueue("#productMatchReview", productMatchReview.review_queue.filter(r => ["low_confidence_after_matching", "conflict_after_matching", "uncertain_product_identity"].includes(r.reason)));
+      renderReviewQueue("#duplicateReview", duplicateReview.review_queue.filter(r => ["duplicate", "near_duplicate"].includes(r.reason)));
     }
     document.querySelector("#catalogForm").addEventListener("submit", e => {
       e.preventDefault(); postForm("/api/catalog/import", e.currentTarget);
@@ -875,10 +959,10 @@ ADMIN_HTML = """
       document.querySelector("#officialAssets").innerHTML = rows.map(a => item(`<strong>${esc(a.brand)} / ${esc(a.product_name)}</strong><div class="meta">Official image reference learned<br>${a.visual_signature && a.visual_signature.result !== "Unknown" ? "Visual reference ready" : "Waiting for visual reference download or upload"}</div>`)).join("") || "<div class='meta'>No official image references learned yet</div>";
     }
     function renderBatches(rows) {
-      document.querySelector("#batches").innerHTML = rows.map(b => item(`<strong>${esc(b.id)}</strong><div class="meta">status ${esc(b.status)} / vision ${esc(b.vision_status || "within_budget")}<br>total ${b.total_files || 0} / ingested ${b.ingested || 0} / duplicated ${b.duplicated || 0} / corrupted ${b.corrupted || 0} / low quality ${b.low_quality || 0}<br>coarse ${b.coarse_classified || 0} / matched ${b.matched || 0} / unknown ${b.unknown || 0} / review ${b.review_needed || 0} / failed ${b.failed || 0}<br>vision calls ${b.vision_calls_used || b.openai_vision_calls_used || 0} / max ${b.max_vision_calls_per_batch || 0} / est. cost ${b.estimated_cost || 0}</div>`)).join("") || "<div class='meta'>No batches</div>";
+      document.querySelector("#batches").innerHTML = rows.map(b => item(`<strong>${esc(b.id)}</strong><div class="meta">status ${esc(b.status)} / catalog ${esc(b.catalog_status || "missing")} / next ${esc(b.next_action || "none")}<br>total ${b.total_files || 0} / ingested ${b.ingested || 0} / duplicated ${b.duplicated || 0} / corrupted ${b.corrupted || 0} / low quality ${b.low_quality || 0}<br>official-like ${b.official_like_candidate_count || 0} / human ${b.human_wearing_count || 0} / scene ${b.scene_photo_count || 0} / product ${b.product_photo_count || 0} / multi-product ${b.multi_product_photo_count || 0}<br>pending matching ${b.pending_product_matching_count || 0} / blocked missing catalog ${b.blocked_missing_official_catalog_count || 0}<br>coarse ${b.coarse_classified || 0} / matched ${b.matched || 0} / unknown ${b.unknown || 0} / review ${b.review_needed || 0} / failed ${b.failed || 0}<br>vision calls ${b.vision_calls_used || b.openai_vision_calls_used || 0} / max ${b.max_vision_calls_per_batch || 0} / est. cost ${b.estimated_cost || 0}</div>`)).join("") || "<div class='meta'>No batches</div>";
     }
-    function renderReviewQueue(rows) {
-      document.querySelector("#reviewQueue").innerHTML = rows.map(r => item(`<strong>${esc(r.reason)}</strong><div class="meta">${esc(r.item_type)} / ${esc(r.item_id)}<br>confidence: ${esc(r.confidence)}<br>${esc(JSON.stringify(r.review_payload || {}))}</div>`)).join("") || "<div class='meta'>No pending review items</div>";
+    function renderReviewQueue(selector, rows) {
+      document.querySelector(selector).innerHTML = rows.map(r => item(`<strong>${esc(r.reason)}</strong><div class="meta">${esc(r.item_type)} / ${esc(r.item_id)}<br>confidence: ${esc(r.confidence)}<br>${esc(JSON.stringify(r.review_payload || {}))}</div>`)).join("") || "<div class='meta'>No pending review items</div>";
     }
     function renderObservations(rows) {
       document.querySelector("#observations").innerHTML = rows.map(o => {
