@@ -1,0 +1,43 @@
+Fashion Knowledge Engine Phase 1 Review Bundle
+
+Current Commit Hash:
+c76c325e125f1389e018af0a749c1e40c381c32b
+
+Current Branch:
+master
+
+Repository:
+https://github.com/guzhiwei390-max/fashion-knowledge-engine-phase-review
+
+Test Command:
+pytest tests/test_phase1.py -q
+
+Test Result:
+50 passed, 3 warnings
+
+Latest Test Run Summary:
+- Raw Asset Ingestion without Official Catalog is allowed.
+- Missing Official Catalog is tracked at batch/system level.
+- blocked_missing_official_catalog does not create per-asset Human Review Queue items.
+- Official Site Learning positive sample creates official_products, official_product_assets, and official_product_visual_references.
+- Official Candidate Bootstrap creates official_candidate_assets and official_candidate_groups.
+- Confirming an official-like candidate writes Official Truth and requeues pending product matching.
+- Batch Progress exposes pending_product_matching_count, blocked_missing_official_catalog_count, catalog_status, next_action, and coarse classification counts.
+
+Warnings:
+- Starlette TestClient/httpx deprecation warning.
+- FastAPI on_event deprecation warning.
+- pytest-asyncio default fixture loop scope warning.
+
+Review Bundle Contents:
+- Current source code under app/
+- tests/test_phase1.py
+- Database schema and migration logic in app/database.py
+- Zip import code in app/assets.py and app/main.py
+- Official Site Learning code in app/catalog.py and app/main.py
+- Official Candidate Bootstrap code in app/assets.py, app/review.py, app/database.py, and app/main.py
+- Review Queue code in app/review.py and app/main.py
+- Batch Progress code in app/assets.py and app/main.py
+- PHASE_REVIEW.md
+- PHASE_1_ACCEPTANCE_REVIEW.md
+- ARCHITECTURE_DECISIONS.md
