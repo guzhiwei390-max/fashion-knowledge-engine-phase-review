@@ -519,6 +519,31 @@ ADMIN_HTML = """
     .subtitle { margin-top: 8px; color: var(--muted); font-size: 14px; }
     main { padding: 24px 36px 40px; display: grid; gap: 18px; }
     .grid { display: grid; grid-template-columns: 360px 1fr; gap: 18px; align-items: start; }
+    .flow { display: grid; gap: 14px; }
+    .step {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: #fffdf9;
+    }
+    .stepTitle {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      font-weight: 750;
+      margin-bottom: 10px;
+    }
+    .badge {
+      width: 26px;
+      height: 26px;
+      border-radius: 999px;
+      background: var(--accent);
+      color: white;
+      display: inline-grid;
+      place-items: center;
+      font-size: 13px;
+      flex: 0 0 auto;
+    }
     section {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -594,61 +619,47 @@ ADMIN_HTML = """
   <main>
     <div class="grid">
       <section>
-        <h2>Official Site Learning</h2>
-        <form id="officialSiteLearningForm">
-          <input name="brand" placeholder="Brand, e.g. Lululemon" />
-          <input name="url" placeholder="Official homepage, category URL, or product URL" />
-          <input name="max_pages" value="8" />
-          <button>Learn Official Site</button>
-        </form>
-        <div class="meta" style="margin-top:10px">Primary flow: provide a public official website/category/product URL. The system builds Official Catalog, Official Assets, and Official Product DNA when access is allowed.</div>
-        <h2 style="margin-top:22px">Manual Catalog Fallback</h2>
-        <form id="catalogForm">
-          <input type="file" name="file" accept=".csv,.json" />
-          <button>Import CSV/JSON Fallback</button>
-        </form>
-        <div class="meta" style="margin-top:10px">Use CSV/JSON only when official site learning returns Needs Manual Import.</div>
-        <form id="catalogUrlForm" style="margin-top:12px">
-          <input name="brand" placeholder="Brand, e.g. Lululemon" />
-          <input name="url" placeholder="Official product/category URL" />
-          <input name="expected_page_type" value="catalog_page" />
-          <button>Import Public URL</button>
-        </form>
-        <div class="meta" style="margin-top:10px">URL importer reads one public category/product page only, checks robots.txt, and returns Needs Manual Import when access is not clearly allowed.</div>
-        <form id="catalogTreeForm" style="margin-top:12px">
-          <input name="brand" placeholder="Brand, e.g. Lululemon" />
-          <input name="url" placeholder="Official category tree root URL" />
-          <input name="max_pages" value="8" />
-          <button>Import Category Tree</button>
-        </form>
-        <div class="meta" style="margin-top:10px">Category-tree import follows only same-site public category links, respects robots.txt, uses low request volume, and marks records as catalog_tree_import.</div>
-        <h2 style="margin-top:22px">Official Visual Reference</h2>
-        <form id="visualRefForm">
-          <input name="product_id" placeholder="Official product id" />
-          <input name="asset_type" value="official_white_bg" />
-          <input type="file" name="file" accept="image/*" />
-          <button>Upload Visual Reference</button>
-        </form>
-        <h2 style="margin-top:22px">Catalog</h2>
+        <h2>Start Here</h2>
+        <div class="flow">
+          <div class="step">
+            <div class="stepTitle"><span class="badge">1</span><span>Upload your material package</span></div>
+            <form id="zipForm">
+              <input type="file" name="file" accept=".zip" />
+              <button type="submit">Upload Zip</button>
+            </form>
+            <div id="zipStatus" class="status">You can upload now. Product identity will wait if the official catalog is not ready.</div>
+          </div>
+          <div class="step">
+            <div class="stepTitle"><span class="badge">2</span><span>Let the system learn the brand website</span></div>
+            <form id="officialSiteLearningForm">
+              <input name="brand" placeholder="Brand name, e.g. Lululemon" />
+              <input name="url" placeholder="Official homepage, category page, or product page URL" />
+              <input type="hidden" name="max_pages" value="8" />
+              <button type="submit">Learn Official Catalog</button>
+            </form>
+            <div class="meta" style="margin-top:10px">The system reads public allowed official pages, builds Official Catalog, then resumes product matching for uploaded batches.</div>
+          </div>
+          <details class="step">
+            <summary class="stepTitle"><span class="badge">!</span><span>Manual fallback only</span></summary>
+            <div class="meta" style="margin:8px 0 12px">Use this only when official site learning returns Needs Manual Import.</div>
+            <form id="catalogForm">
+              <input type="file" name="file" accept=".csv,.json" />
+              <button type="submit">Import CSV/JSON Fallback</button>
+            </form>
+          </details>
+        </div>
+        <h2 style="margin-top:22px">Official Catalog</h2>
         <div id="catalog" class="cards"></div>
-        <h2 style="margin-top:22px">Official Visual Assets</h2>
+        <h2 style="margin-top:22px">Official Assets Learned</h2>
         <div id="officialAssets" class="cards"></div>
-        <h2 style="margin-top:22px">Visual Reference Library</h2>
-        <div id="visualReferences" class="cards"></div>
       </section>
       <section>
-        <h2>Batch Upload</h2>
+        <h2>Optional: loose images</h2>
         <form id="uploadForm">
           <input type="file" name="files" multiple accept="image/*" />
           <button type="submit">Upload Images</button>
         </form>
         <div id="uploadStatus" class="status">Choose images, then click Upload Images.</div>
-        <h2 style="margin-top:22px">Zip Import</h2>
-        <form id="zipForm">
-          <input type="file" name="file" accept=".zip" />
-          <button type="submit">Import Zip</button>
-        </form>
-        <div id="zipStatus" class="status">Choose a zip file, then click Import Zip.</div>
         <h2 style="margin-top:22px">Search</h2>
         <form id="searchForm">
           <input name="brand" placeholder="Brand, e.g. Lululemon" />
@@ -738,13 +749,12 @@ ADMIN_HTML = """
       await refreshAll();
     }
     async function refreshAll() {
-      const [assets, jobs, cards, catalog, officialAssets, visualReferences, observations, batches, reviewQueue] = await Promise.all([
+      const [assets, jobs, cards, catalog, officialAssets, observations, batches, reviewQueue] = await Promise.all([
         fetch("/api/assets").then(r => r.json()),
         fetch("/api/jobs").then(r => r.json()),
         fetch("/api/knowledge-cards").then(r => r.json()),
         fetch("/api/catalog").then(r => r.json()),
         fetch("/api/catalog/assets").then(r => r.json()),
-        fetch("/api/catalog/visual-references").then(r => r.json()),
         fetch("/api/observations").then(r => r.json()),
         fetch("/api/batches").then(r => r.json()),
         fetch("/api/review-queue?status=pending").then(r => r.json())
@@ -754,7 +764,6 @@ ADMIN_HTML = """
       renderCards(cards.knowledge_cards);
       renderCatalog(catalog.products);
       renderOfficialAssets(officialAssets.official_assets);
-      renderVisualReferences(visualReferences.visual_references);
       renderObservations(observations.observations);
       renderBatches(batches.batches);
       renderReviewQueue(reviewQueue.review_queue);
@@ -764,15 +773,6 @@ ADMIN_HTML = """
     });
     document.querySelector("#officialSiteLearningForm").addEventListener("submit", e => {
       e.preventDefault(); postForm("/api/catalog/learn-site", e.currentTarget);
-    });
-    document.querySelector("#catalogUrlForm").addEventListener("submit", e => {
-      e.preventDefault(); postForm("/api/catalog/import-url", e.currentTarget);
-    });
-    document.querySelector("#catalogTreeForm").addEventListener("submit", e => {
-      e.preventDefault(); postForm("/api/catalog/import-tree", e.currentTarget);
-    });
-    document.querySelector("#visualRefForm").addEventListener("submit", e => {
-      e.preventDefault(); postForm("/api/catalog/visual-reference", e.currentTarget);
     });
     function item(html) { return `<div class="item">${html}</div>`; }
     function renderAssets(rows) {
@@ -788,10 +788,7 @@ ADMIN_HTML = """
       document.querySelector("#catalog").innerHTML = rows.map(p => item(`<strong>${esc(p.brand)} / ${esc(p.product_name)}</strong><div class="meta">ID: ${esc(p.id)}<br>${esc(p.category)} | ${esc(p.material)} | ${esc(p.import_type)}<br>Aliases: ${esc(p.aliases.join(", ") || "none")}</div>`)).join("") || "<div class='meta'>Official catalog is empty</div>";
     }
     function renderOfficialAssets(rows) {
-      document.querySelector("#officialAssets").innerHTML = rows.map(a => item(`<strong>${esc(a.brand)} / ${esc(a.product_name)}</strong><div class="meta">${esc(a.asset_type)} | ${esc(a.import_type)}<br>visual signature: ${a.visual_signature && a.visual_signature.result !== "Unknown" ? "ready" : "missing"}</div>`)).join("") || "<div class='meta'>No official visual references</div>";
-    }
-    function renderVisualReferences(rows) {
-      document.querySelector("#visualReferences").innerHTML = rows.map(r => item(`<strong>${esc(r.brand)} / ${esc(r.product_name)}</strong><div class="meta">${esc(r.asset_type)}<br>signature: ${r.visual_signature && r.visual_signature.result !== "Unknown" ? "ready" : "missing"}<br>structure: ${Object.keys(r.structure_json || {}).length ? "ready" : "pending"}</div>`)).join("") || "<div class='meta'>No visual reference library entries</div>";
+      document.querySelector("#officialAssets").innerHTML = rows.map(a => item(`<strong>${esc(a.brand)} / ${esc(a.product_name)}</strong><div class="meta">Official image reference learned<br>${a.visual_signature && a.visual_signature.result !== "Unknown" ? "Visual reference ready" : "Waiting for visual reference download or upload"}</div>`)).join("") || "<div class='meta'>No official image references learned yet</div>";
     }
     function renderBatches(rows) {
       document.querySelector("#batches").innerHTML = rows.map(b => item(`<strong>${esc(b.id)}</strong><div class="meta">status ${esc(b.status)} / vision ${esc(b.vision_status || "within_budget")}<br>total ${b.total_files || 0} / ingested ${b.ingested || 0} / duplicated ${b.duplicated || 0} / corrupted ${b.corrupted || 0} / low quality ${b.low_quality || 0}<br>coarse ${b.coarse_classified || 0} / matched ${b.matched || 0} / unknown ${b.unknown || 0} / review ${b.review_needed || 0} / failed ${b.failed || 0}<br>vision calls ${b.vision_calls_used || b.openai_vision_calls_used || 0} / max ${b.max_vision_calls_per_batch || 0} / est. cost ${b.estimated_cost || 0}</div>`)).join("") || "<div class='meta'>No batches</div>";

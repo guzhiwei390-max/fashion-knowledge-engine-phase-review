@@ -1,6 +1,6 @@
 # Current Version
 
-Current version: Phase 1 Raw Ingestion / Official Site Learning Correction v1.0
+Current version: Phase 1 User-Facing Workflow Cleanup v1.1
 
 Current Commit Hash: pending until commit; see final response for exact hash
 
@@ -11,14 +11,12 @@ Current Branch: master
 # Added
 
 This iteration added:
-- Raw Asset Ingestion no longer requires Official Catalog
-- product_matching_status on assets
-- blocked_missing_official_catalog state for product identity matching
-- Official Site Learning endpoint: POST /api/catalog/learn-site
-- Automatic unblocking of previously paused product matching jobs after Official Catalog is built
-- Admin UI Official Site Learning form
-- Regression tests for zip ingestion without Official Catalog
-- Regression tests for product matching blocked state without Official Catalog
+- User-facing Start Here workflow
+- Primary Step 1: Upload Zip
+- Primary Step 2: Learn Official Catalog from brand website URL
+- CSV/JSON moved into Manual fallback only
+- Internal fields hidden from the main UI
+- Official Assets display changed to user-facing language
 
 ---
 
@@ -28,7 +26,7 @@ Added tables:
 - None
 
 Modified tables:
-- assets: added product_matching_status
+- None in this UI-only iteration
 
 State values:
 - pending
@@ -42,19 +40,17 @@ Added interfaces:
 - POST /api/catalog/learn-site
 
 Modified interfaces:
-- POST /api/upload now allows raw asset ingestion without Official Catalog
-- POST /api/import/zip now allows raw zip ingestion without Official Catalog
-- POST /api/jobs/process marks matching as blocked_missing_official_catalog when no official catalog exists
-- POST /api/catalog/import, /api/catalog/import-url, /api/catalog/import-tree, /api/catalog/learn-site unblock paused matching jobs after catalog creation
-- POST /api/batches/{batch_id}/retry can requeue jobs blocked by missing Official Catalog
+- No API contract changes in this UI-only iteration
 
 ---
 
 # Architecture Changes
 
 This iteration corrected a major rule:
-- Official Catalog is not a prerequisite for Raw Asset Ingestion.
-- Official Catalog is a prerequisite only for Product Matching and Final Product Identification.
+- The page no longer asks users to fill internal catalog_page, product_id, asset_type, official_white_bg, category tree, or visual reference fields.
+- The user-facing flow is now Upload Zip first, then provide brand name and official site/category/product URL.
+- Manual CSV/JSON import is visually demoted to fallback only.
+- Internal API compatibility remains, but internal pipeline fields are not part of the main user workflow.
 
 Correct flow:
 - User uploads zip or images
@@ -72,13 +68,11 @@ Manual CSV/JSON import is now documented as fallback only when Official Site Lea
 # What Works
 
 Currently working:
-- Zip upload succeeds even when Official Catalog is empty
-- Raw assets are stored with Reality Truth by default
-- Batch id, metadata, thumbnail, unsupported detection, corrupted detection, low quality detection, dedup, and coarse classification still run without Official Catalog
-- Assets created before Official Catalog exists are marked blocked_missing_official_catalog for product matching
-- Jobs blocked by missing catalog can be unblocked after catalog import or official site learning
-- Admin UI has Official Site Learning as the primary catalog creation path
-- CSV/JSON import remains available as manual fallback
+- Page presents a simple two-step workflow: upload material package, then learn official catalog from brand website.
+- Zip upload remains available before Official Catalog exists.
+- Official Site Learning is the primary catalog creation action.
+- CSV/JSON import is available only inside Manual fallback.
+- Official product ids, visual reference types, expected_page_type, and category-tree internals are not exposed in the main UI.
 - Automated tests pass: 45 passed
 
 ---
@@ -97,8 +91,8 @@ Known limitations:
 # Next Recommended Step
 
 Recommended next step:
-- Test the flow with a real mixed zip before catalog exists.
-- Provide a brand official category URL and verify the blocked_missing_official_catalog jobs are requeued after catalog import.
+- Use the simplified page to upload the real mixed zip.
+- Provide one brand official category URL and verify Official Site Learning can build the catalog.
 - Improve Official Site Learning extraction for common product-list structured data patterns.
 - Add clearer batch progress counters for blocked_missing_official_catalog.
 
@@ -107,10 +101,7 @@ Recommended next step:
 # Review Focus
 
 Please review:
-- Whether Raw Asset Ingestion is fully decoupled from Official Catalog.
-- Whether Official Catalog only blocks Product Matching / Final Product Identification.
-- Whether product_matching_status communicates blocked_missing_official_catalog clearly.
-- Whether Official Site Learning is the primary path and CSV/JSON is only fallback.
-- Whether ordinary uploads remain Reality Truth.
-- Whether Vision still does not run as a first-layer classifier.
-- Whether no module guesses product identity when Official Catalog is missing.
+- Whether the page is now user-facing rather than pipeline-facing.
+- Whether users can follow Upload Zip -> Learn Official Catalog without understanding database fields.
+- Whether CSV/JSON is clearly fallback only.
+- Whether internal catalog fields are no longer exposed as primary UI inputs.
