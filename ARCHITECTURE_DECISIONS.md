@@ -155,11 +155,44 @@ Phase 1 must handle real production material packages, including 10,000+ mixed i
 
 Batch upload and zip import must preserve originals, create a batch_id, keep per-file status, and avoid failing an entire batch because one file is corrupted, duplicated, low quality, or unknown.
 
+Official Catalog must not block Raw Asset Ingestion. Users may upload raw images or zip files before the Official Catalog exists.
+
+When Official Catalog is missing, product identity matching must be paused with `product_matching_status = blocked_missing_official_catalog` or equivalent Unknown identity status. The system must still preserve raw files, thumbnails, metadata, unsupported file records, duplicate status, quality status, and coarse classification.
+
+Official Catalog is a prerequisite for Product Matching and Final Product Identification only.
+
 Zip uploads must be streamed to disk. The API must not read the entire zip into memory in one operation.
 
 Large-batch import endpoints must return small summaries. Asset-level details must be fetched through paginated APIs.
 
 Unsupported files inside zip imports must be recorded in batch progress instead of silently ignored.
+
+## Official Site Learning
+
+The primary Official Catalog creation flow is Official Site Learning.
+
+The user provides one or more of:
+
+- brand name
+- official website URL
+- category URL
+- product URL
+- official page/image entry points
+
+The system is responsible for learning public official product data when access is allowed:
+
+- product names
+- categories
+- colors
+- materials
+- official white-background images
+- official model images
+- official detail images
+- Official Product Catalog
+- Official Product Assets
+- Official Product DNA
+
+CSV/JSON Manual Import is fallback only. It should be used when official site learning cannot proceed because public access is not available, robots.txt disallows access, the page requires login, the site is region blocked, or anti-bot protections prevent compliant access.
 
 Ordinary user uploads default to Reality Truth. A filename containing words such as "official" must not create Official Truth. Official Truth may only enter through Official Catalog or explicit official visual reference import paths.
 

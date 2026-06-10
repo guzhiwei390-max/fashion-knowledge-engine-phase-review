@@ -1,4 +1,4 @@
-import tempfile
+﻿import tempfile
 import uuid
 import json
 from pathlib import Path
@@ -11,13 +11,13 @@ from fastapi.staticfiles import StaticFiles
 from .assets import batch_progress, import_zip_file, save_upload_file
 from .catalog import (
     add_official_visual_reference,
+    catalog_count,
     import_catalog_file,
     import_catalog_tree_url,
     import_catalog_url,
     list_catalog,
     list_official_assets,
     list_visual_references,
-    require_catalog_ready,
 )
 from .config import DATA_DIR, UPLOAD_DIR
 from .database import connect, decode_json, init_db
@@ -82,17 +82,20 @@ def source_types() -> dict:
 
 @app.post("/api/upload")
 async def upload_images(files: Annotated[list[UploadFile], File(...)]) -> dict:
-    require_catalog_ready()
     batch_id = str(uuid.uuid4())
     imported = []
     for file in files:
         imported.append(await save_upload_file(file, batch_id))
-    return {"batch_id": batch_id, "assets": imported}
+    return {
+        "batch_id": batch_id,
+        "total_received": len(imported),
+        "status": "ingested",
+        "message": raw_ingestion_message(),
+    }
 
 
 @app.post("/api/import/zip")
 async def import_zip(file: Annotated[UploadFile, File(...)]) -> dict:
-    require_catalog_ready()
     if not file.filename or Path(file.filename).suffix.lower() != ".zip":
         raise HTTPException(status_code=400, detail="Only .zip files are supported")
     batch_id = str(uuid.uuid4())
@@ -113,12 +116,21 @@ async def import_zip(file: Annotated[UploadFile, File(...)]) -> dict:
         "total_received": summary["total_received"],
         "unsupported_count": summary["unsupported_count"],
         "status": summary["status"],
+        "message": raw_ingestion_message(),
     }
+
+
+def raw_ingestion_message() -> str:
+    if catalog_count() == 0:
+        return "Assets ingested. Official Catalog is missing, so product identity matching is paused. Provide a brand official site or category URL and the system will build Official Catalog before continuing matching."
+    return "Assets ingested. Official Catalog exists, so product matching can continue."
 
 
 @app.post("/api/catalog/import")
 async def import_catalog(file: Annotated[UploadFile, File(...)]) -> dict:
-    return await import_catalog_file(file)
+    result = await import_catalog_file(file)
+    result["unblocked_jobs"] = unblock_missing_catalog_jobs()
+    return result
 
 
 @app.post("/api/catalog/import-url")
@@ -127,7 +139,9 @@ async def import_catalog_from_url(
     brand: Annotated[str, Form()],
     expected_page_type: Annotated[str, Form()] = "catalog_page",
 ) -> dict:
-    return await import_catalog_url(url, brand, expected_page_type=expected_page_type)
+    result = await import_catalog_url(url, brand, expected_page_type=expected_page_type)
+    result["unblocked_jobs"] = unblock_missing_catalog_jobs() if catalog_count() else 0
+    return result
 
 
 @app.post("/api/catalog/import-tree")
@@ -136,7 +150,50 @@ async def import_catalog_tree(
     brand: Annotated[str, Form()],
     max_pages: Annotated[int, Form()] = 8,
 ) -> dict:
-    return await import_catalog_tree_url(url, brand, max_pages=max_pages)
+    result = await import_catalog_tree_url(url, brand, max_pages=max_pages)
+    result["unblocked_jobs"] = unblock_missing_catalog_jobs() if catalog_count() else 0
+    return result
+
+
+@app.post("/api/catalog/learn-site")
+async def learn_official_site(
+    url: Annotated[str, Form()],
+    brand: Annotated[str, Form()],
+    max_pages: Annotated[int, Form()] = 8,
+) -> dict:
+    result = await import_catalog_tree_url(url, brand, max_pages=max_pages)
+    if result.get("status") == "Needs Manual Import" or catalog_count() == 0:
+        return {
+            **result,
+            "flow": "official_site_learning",
+            "fallback": "Needs Manual Import",
+            "message": "Official site learning could not build a catalog. Provide a public brand category page or use CSV/JSON fallback.",
+        }
+    return {
+        **result,
+        "flow": "official_site_learning",
+        "unblocked_jobs": unblock_missing_catalog_jobs(),
+        "message": "Official Catalog was built automatically. Previously paused product matching jobs are queued again.",
+    }
+
+
+def unblock_missing_catalog_jobs() -> int:
+    with connect() as conn:
+        conn.execute(
+            """
+            UPDATE assets
+            SET product_matching_status = 'pending'
+            WHERE product_matching_status = 'blocked_missing_official_catalog'
+            """
+        )
+        cursor = conn.execute(
+            """
+            UPDATE analysis_jobs
+            SET status = 'queued', error_message = NULL
+            WHERE status = 'blocked_missing_official_catalog'
+            """
+        )
+        return cursor.rowcount if cursor.rowcount is not None else 0
 
 
 @app.get("/api/catalog")
@@ -256,7 +313,7 @@ def retry_batch(batch_id: str) -> dict:
             UPDATE analysis_jobs
             SET status = 'queued', error_message = NULL
             WHERE asset_id IN (SELECT id FROM assets WHERE upload_batch_id = ?)
-              AND status IN ('failed', 'paused')
+              AND status IN ('failed', 'paused', 'blocked_missing_official_catalog')
             """,
             (batch_id,),
         )
@@ -288,7 +345,7 @@ def resume_batch(batch_id: str) -> dict:
             UPDATE analysis_jobs
             SET status = 'queued'
             WHERE asset_id IN (SELECT id FROM assets WHERE upload_batch_id = ?)
-              AND status = 'paused'
+              AND status IN ('paused', 'blocked_missing_official_catalog')
             """,
             (batch_id,),
         )
@@ -527,7 +584,7 @@ ADMIN_HTML = """
   <header>
     <div>
       <h1>Fashion Knowledge Engine</h1>
-      <div class="subtitle">Phase 1: Upload → Vision → Structure → DNA → Knowledge Card → Retrieve. Unknown first.</div>
+      <div class="subtitle">Phase 1: Upload 鈫?Vision 鈫?Structure 鈫?DNA 鈫?Knowledge Card 鈫?Retrieve. Unknown first.</div>
     </div>
     <div class="toolbar">
       <button class="secondary" onclick="processJobs()">Process Queue</button>
@@ -537,12 +594,20 @@ ADMIN_HTML = """
   <main>
     <div class="grid">
       <section>
-        <h2>Official Catalog Import</h2>
+        <h2>Official Site Learning</h2>
+        <form id="officialSiteLearningForm">
+          <input name="brand" placeholder="Brand, e.g. Lululemon" />
+          <input name="url" placeholder="Official homepage, category URL, or product URL" />
+          <input name="max_pages" value="8" />
+          <button>Learn Official Site</button>
+        </form>
+        <div class="meta" style="margin-top:10px">Primary flow: provide a public official website/category/product URL. The system builds Official Catalog, Official Assets, and Official Product DNA when access is allowed.</div>
+        <h2 style="margin-top:22px">Manual Catalog Fallback</h2>
         <form id="catalogForm">
           <input type="file" name="file" accept=".csv,.json" />
-          <button>Import Official Catalog</button>
+          <button>Import CSV/JSON Fallback</button>
         </form>
-        <div class="meta" style="margin-top:10px">User uploads are blocked until the official catalog exists.</div>
+        <div class="meta" style="margin-top:10px">Use CSV/JSON only when official site learning returns Needs Manual Import.</div>
         <form id="catalogUrlForm" style="margin-top:12px">
           <input name="brand" placeholder="Brand, e.g. Lululemon" />
           <input name="url" placeholder="Official product/category URL" />
@@ -696,6 +761,9 @@ ADMIN_HTML = """
     }
     document.querySelector("#catalogForm").addEventListener("submit", e => {
       e.preventDefault(); postForm("/api/catalog/import", e.currentTarget);
+    });
+    document.querySelector("#officialSiteLearningForm").addEventListener("submit", e => {
+      e.preventDefault(); postForm("/api/catalog/learn-site", e.currentTarget);
     });
     document.querySelector("#catalogUrlForm").addEventListener("submit", e => {
       e.preventDefault(); postForm("/api/catalog/import-url", e.currentTarget);

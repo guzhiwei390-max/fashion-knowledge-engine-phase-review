@@ -17,6 +17,8 @@ from .visual import image_signature, signature_similarity
 
 
 NEAR_DUPLICATE_THRESHOLD = 0.97
+MATCHING_PENDING = "pending"
+MATCHING_BLOCKED_MISSING_CATALOG = "blocked_missing_official_catalog"
 
 
 def is_allowed_image(filename: str) -> bool:
@@ -137,6 +139,8 @@ def create_asset_record(
             "content_signals": metadata.get("content_signals", {}),
             "original_saved": True,
         }
+        catalog_ready = conn.execute("SELECT COUNT(*) AS count FROM official_products").fetchone()["count"] > 0
+        product_matching_status = MATCHING_PENDING if catalog_ready else MATCHING_BLOCKED_MISSING_CATALOG
         conn.execute(
             """
             INSERT INTO assets (
@@ -144,9 +148,9 @@ def create_asset_record(
                 source_type, knowledge_layer, pipeline_type, truth_layer,
                 ingestion_metadata, ingestion_status, asset_type, quality_status,
                 width, height, exif_json, thumbnail_uri, visual_signature,
-                duplicate_of_asset_id, duplicate_status, upload_batch_id, created_at
+                duplicate_of_asset_id, duplicate_status, product_matching_status, upload_batch_id, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 asset_id,
@@ -170,6 +174,7 @@ def create_asset_record(
                 encode_json(visual_signature),
                 duplicate_of_asset_id,
                 duplicate_status,
+                product_matching_status,
                 batch_id,
                 now,
             ),
@@ -185,7 +190,10 @@ def create_asset_record(
                 payload={"ingestion_status": "corrupted", "original_name": original_name},
             )
         else:
-            job_status = "queued" if classification["asset_type"] == "multi_product_photo" else "pending"
+            if product_matching_status == MATCHING_BLOCKED_MISSING_CATALOG:
+                job_status = MATCHING_BLOCKED_MISSING_CATALOG
+            else:
+                job_status = "queued" if classification["asset_type"] == "multi_product_photo" else "pending"
             conn.execute(
                 """
                 INSERT INTO analysis_jobs (
@@ -195,6 +203,18 @@ def create_asset_record(
                 """,
                 (str(uuid.uuid4()), asset_id, job_status, now),
             )
+            if product_matching_status == MATCHING_BLOCKED_MISSING_CATALOG:
+                enqueue_review_item(
+                    conn,
+                    item_type="asset",
+                    item_id=asset_id,
+                    reason="unknown",
+                    confidence=0.0,
+                    payload={
+                        "product_matching_status": MATCHING_BLOCKED_MISSING_CATALOG,
+                        "message": "Assets ingested. Official Catalog is missing, so product identity matching is paused.",
+                    },
+                )
             if classification["asset_type"] == "multi_product_photo":
                 create_reserved_product_region(conn, asset_id)
                 enqueue_review_item(
@@ -241,6 +261,7 @@ def create_asset_record(
         "visual_signature": visual_signature,
         "duplicate_of_asset_id": duplicate_of_asset_id,
         "duplicate_status": duplicate_status,
+        "product_matching_status": product_matching_status,
         "upload_batch_id": batch_id,
         "created_at": now,
     }

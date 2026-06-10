@@ -68,6 +68,7 @@ def init_db() -> None:
                 visual_signature TEXT NOT NULL DEFAULT '{}',
                 duplicate_of_asset_id TEXT,
                 duplicate_status TEXT NOT NULL DEFAULT 'unique',
+                product_matching_status TEXT NOT NULL DEFAULT 'pending',
                 upload_batch_id TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
@@ -563,6 +564,7 @@ def init_db() -> None:
         ensure_column(conn, "assets", "visual_signature", "TEXT NOT NULL DEFAULT '{}'")
         ensure_column(conn, "assets", "duplicate_of_asset_id", "TEXT")
         ensure_column(conn, "assets", "duplicate_status", "TEXT NOT NULL DEFAULT 'unique'")
+        ensure_column(conn, "assets", "product_matching_status", "TEXT NOT NULL DEFAULT 'pending'")
         ensure_column(conn, "official_product_assets", "local_file_uri", "TEXT")
         ensure_column(conn, "official_product_assets", "visual_signature", "TEXT NOT NULL DEFAULT '{}'")
         ensure_column(conn, "official_products", "import_type", "TEXT NOT NULL DEFAULT 'manual_import'")

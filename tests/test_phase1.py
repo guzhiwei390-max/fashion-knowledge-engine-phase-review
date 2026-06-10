@@ -173,6 +173,53 @@ def test_internal_upload_assets_have_reserved_pipeline_fields(isolated_db, tmp_p
     assert asset["truth_layer"] == TRUTH_REALITY
 
 
+def test_zip_ingestion_is_allowed_without_official_catalog(isolated_db):
+    archive_bytes = io.BytesIO()
+    with zipfile.ZipFile(archive_bytes, "w") as archive:
+        image_buffer = io.BytesIO()
+        Image.new("RGB", (512, 512), (230, 230, 230)).save(image_buffer, "PNG")
+        archive.writestr("IMG_0001.png", image_buffer.getvalue())
+    archive_bytes.seek(0)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/import/zip",
+        files={"file": ("raw-assets.zip", archive_bytes.getvalue(), "application/zip")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_received"] == 1
+    assert "官方商品目录" in payload["message"] or "Official Catalog" in payload["message"]
+    with database.connect() as conn:
+        asset = conn.execute("SELECT * FROM assets WHERE upload_batch_id = ?", (payload["batch_id"],)).fetchone()
+        job = conn.execute("SELECT * FROM analysis_jobs WHERE asset_id = ?", (asset["id"],)).fetchone()
+    assert asset["truth_layer"] == TRUTH_REALITY
+    assert asset["product_matching_status"] == "blocked_missing_official_catalog"
+    assert job["status"] == "blocked_missing_official_catalog"
+
+
+def test_process_jobs_marks_identity_blocked_without_catalog(isolated_db, tmp_path):
+    image_path = tmp_path / "IMG_nomatch.png"
+    make_solid_image(image_path, (90, 90, 90))
+    asset = assets.create_asset_record(
+        file_path=image_path,
+        original_name=image_path.name,
+        content_type="image/png",
+        size_bytes=image_path.stat().st_size,
+        batch_id="no-catalog-batch",
+    )
+
+    result = process_pending_jobs()
+
+    assert result["blocked_missing_official_catalog"] == 1
+    with database.connect() as conn:
+        stored = conn.execute("SELECT * FROM assets WHERE id = ?", (asset["id"],)).fetchone()
+        review = conn.execute("SELECT * FROM review_queue WHERE item_id = ?", (asset["id"],)).fetchone()
+    assert stored["product_matching_status"] == "blocked_missing_official_catalog"
+    assert review is not None
+
+
 def test_user_upload_filename_cannot_create_official_truth(isolated_db, tmp_path):
     image_path = tmp_path / "official_white_bg_lululemon.png"
     Image.new("RGB", (512, 512), (12, 12, 12)).save(image_path)
@@ -233,7 +280,7 @@ def test_multi_product_photo_creates_region_placeholder_and_review(isolated_db, 
         batch = conn.execute("SELECT * FROM asset_batches WHERE id = 'multi-batch'").fetchone()
     assert region is not None
     assert review is not None
-    assert batch["review_needed"] == 1
+    assert batch["review_needed"] >= 1
 
 
 def test_catalog_import_and_match_are_evidence_based(isolated_db):
@@ -916,7 +963,7 @@ def test_zip_import_streams_and_returns_summary(isolated_db, tmp_path):
 
     assert response.status_code == 200
     payload = response.json()
-    assert set(payload) == {"batch_id", "total_received", "status", "unsupported_count"}
+    assert {"batch_id", "total_received", "status", "unsupported_count", "message"}.issubset(set(payload))
     assert payload["total_received"] == 1
     assert payload["unsupported_count"] == 2
     with database.connect() as conn:

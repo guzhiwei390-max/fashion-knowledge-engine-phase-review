@@ -7,7 +7,7 @@ from PIL import Image, UnidentifiedImageError
 
 from .catalog import list_catalog, match_official_product, match_official_product_by_visual_signature
 from .confidence import evaluate_match_confidence
-from .assets import refresh_batch_progress
+from .assets import MATCHING_BLOCKED_MISSING_CATALOG, refresh_batch_progress
 from .database import connect, decode_json, encode_json, utc_now
 from .evidence import build_match_evidence
 from .openai_vision import empty_product_structure
@@ -317,15 +317,17 @@ def process_pending_jobs(limit: int = 5000) -> dict[str, Any]:
     processed = 0
     failed = 0
     paused = 0
+    blocked_missing_official_catalog = 0
     vision_remaining_by_batch: dict[str, int] = {}
     with connect() as conn:
+        official_catalog_ready = conn.execute("SELECT COUNT(*) AS count FROM official_products").fetchone()["count"] > 0
         jobs = conn.execute(
             """
             SELECT analysis_jobs.*, assets.file_uri, assets.original_name, assets.source_type,
                    assets.upload_batch_id, assets.asset_type, assets.quality_status, assets.duplicate_status
             FROM analysis_jobs
             JOIN assets ON assets.id = analysis_jobs.asset_id
-            WHERE analysis_jobs.status IN ('queued', 'pending', 'failed')
+            WHERE analysis_jobs.status IN ('queued', 'pending', 'failed', 'blocked_missing_official_catalog')
             ORDER BY analysis_jobs.created_at ASC
             LIMIT ?
             """,
@@ -334,6 +336,35 @@ def process_pending_jobs(limit: int = 5000) -> dict[str, Any]:
 
         for job in jobs:
             started_at = utc_now()
+            if not official_catalog_ready:
+                conn.execute(
+                    "UPDATE analysis_jobs SET status = ?, started_at = ?, finished_at = ?, error_message = ? WHERE id = ?",
+                    (
+                        MATCHING_BLOCKED_MISSING_CATALOG,
+                        started_at,
+                        utc_now(),
+                        "Official Product Catalog missing; product identity matching paused.",
+                        job["id"],
+                    ),
+                )
+                conn.execute(
+                    "UPDATE assets SET product_matching_status = ? WHERE id = ?",
+                    (MATCHING_BLOCKED_MISSING_CATALOG, job["asset_id"]),
+                )
+                enqueue_review_item(
+                    conn,
+                    item_type="asset",
+                    item_id=job["asset_id"],
+                    reason="unknown",
+                    confidence=0.0,
+                    payload={
+                        "product_matching_status": MATCHING_BLOCKED_MISSING_CATALOG,
+                        "message": "素材已导入。当前缺少官方商品目录，商品身份确认已暂停。请提供品牌官网入口或分类页 URL，系统将自动建立 Official Catalog 后继续匹配。",
+                    },
+                )
+                refresh_batch_progress(conn, job["upload_batch_id"])
+                blocked_missing_official_catalog += 1
+                continue
             conn.execute(
                 "UPDATE analysis_jobs SET status = 'running', attempts = attempts + 1, started_at = ?, error_message = NULL WHERE id = ?",
                 (started_at, job["id"]),
@@ -434,7 +465,12 @@ def process_pending_jobs(limit: int = 5000) -> dict[str, Any]:
                 )
                 refresh_batch_progress(conn, job["upload_batch_id"])
                 failed += 1
-    return {"processed": processed, "failed": failed, "paused": paused}
+    return {
+        "processed": processed,
+        "failed": failed,
+        "paused": paused,
+        "blocked_missing_official_catalog": blocked_missing_official_catalog,
+    }
 
 
 def batch_vision_remaining(conn, batch_id: str) -> int:

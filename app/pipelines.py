@@ -110,6 +110,7 @@ RESERVED_API_DESIGN: dict[str, Any] = {
         "POST /api/catalog/import",
         "POST /api/catalog/import-url",
         "POST /api/catalog/import-tree",
+        "POST /api/catalog/learn-site",
         "POST /api/catalog/visual-reference",
         "POST /api/upload",
         "POST /api/import/zip",
