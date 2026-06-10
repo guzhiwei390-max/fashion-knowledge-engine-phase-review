@@ -21,13 +21,19 @@ This iteration added:
 - Explicit acceptance counters on Official Catalog Bootstrap responses
 - POST /api/assets/import-zip alias for Zip ingestion review
 - Raw ingestion status fields on Zip and loose image upload responses
+- Official Catalog Import Job table
+- Official URL Candidate table
+- Official Parse Event table
+- Robots.txt fetch status and sitemap attempt telemetry
 
 ---
 
 # Database Changes
 
 Added tables:
-- None
+- official_catalog_import_jobs
+- official_url_candidates
+- official_parse_events
 
 Modified tables:
 - None
@@ -47,8 +53,9 @@ Added interfaces:
 Modified interfaces:
 - POST /api/catalog/learn-site now uses Official Catalog Bootstrap instead of directly treating a failed page read as Manual Import.
 - POST /api/catalog/learn-site now returns raw_asset_ingestion_status, official_catalog_status, product_matching_status, candidate_urls, and stages.
-- POST /api/catalog/learn-site now also returns robots_txt_read, sitemap_discovered, sitemap_urls_attempted, sitemap_urls_found, category_candidates_found, product_candidates_found, fetched_urls_count, parsed_product_pages_count, official_products_created, and official_product_assets_created.
+- POST /api/catalog/learn-site now also returns robots_txt_fetched, robots_allowed, sitemap_found, sitemap_url, sitemap_urls_attempted, sitemap_urls_found, category_candidates_found, product_candidates_found, fetched_urls_count, parsed_product_pages_count, official_products_created, official_product_assets_created, and official_visual_references_created.
 - POST /api/import/zip and POST /api/assets/import-zip return raw_asset_ingestion_status, official_catalog_status, and product_matching_status.
+- POST /api/catalog/learn-site now records import jobs, URL candidates, and parse events in the database.
 
 ---
 
@@ -61,6 +68,7 @@ This iteration corrected the Official Site Learning flow:
 - If sitemap data is readable, the system extracts product/category/collection candidate URLs.
 - Candidate URLs are tried before any Manual CSV/JSON fallback is suggested.
 - Failed or partial official site learning does not block Raw Asset Ingestion.
+- Robots.txt, sitemap attempts, parse events, and candidates are stored for audit.
 
 Status separation is now explicit:
 - Raw Asset Ingestion remains allowed.
@@ -80,6 +88,7 @@ Currently working:
 - Partial learning returns a clear message asking for category URL, product URL, or official candidate references.
 - Manual CSV/JSON is presented as final fallback only.
 - Actual lululemon homepage acceptance run returned needs_manual_review because robots.txt access could not be verified.
+- Actual lululemon run: robots_txt_fetched = true, robots_allowed = false, sitemap_urls_attempted = 9, official_products_created = 0, official_product_assets_created = 0.
 - Zip upload acceptance run returned batch_id with raw_asset_ingestion_status = allowed and product_matching_status = blocked_missing_official_catalog.
 - Automated tests pass: 48 passed
 

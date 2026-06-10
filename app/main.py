@@ -173,8 +173,16 @@ async def learn_official_site(
     url: Annotated[str, Form()],
     brand: Annotated[str, Form()],
     max_pages: Annotated[int, Form()] = 8,
+    category_url: Annotated[str | None, Form()] = None,
+    product_url: Annotated[str | None, Form()] = None,
 ) -> dict:
-    result = await bootstrap_official_catalog(url, brand, max_pages=max_pages)
+    result = await bootstrap_official_catalog(
+        url,
+        brand,
+        max_pages=max_pages,
+        category_url=category_url,
+        product_url=product_url,
+    )
     if result.get("official_catalog_status") != "ready" or result.get("product_matching_status") != "ready":
         return result
     return {
@@ -729,7 +737,7 @@ ADMIN_HTML = """
     function renderResultSummary(data) {
       const marker = data && (data.result || data.status || data.fallback || "");
       if (marker === "official_site_learning_partial" || marker === "needs_manual_review" || data.official_catalog_status === "partial" || data.official_catalog_status === "missing") {
-        resultSummary.innerHTML = `<div class="resultTitle">Official learning is incomplete</div><div class="meta">素材可以继续导入。当前官方目录学习未完成，商品身份确认会暂停。请提供品牌分类页 URL、商品页 URL，或上传官方页面截图 / 官方产品图片作为候选参考。Manual CSV 仅作为 fallback。</div>`;
+        resultSummary.innerHTML = `<div class="resultTitle">Official learning is incomplete</div><div class="meta">素材可以继续导入。当前官方目录学习未完成，商品身份确认会暂停。请提供品牌分类页 URL、商品页 URL，或上传官方页面截图 / 官方产品图片作为候选参考。CSV / JSON 仅作为最终 fallback。</div>${learningMetricsHtml(data)}`;
         resultSummary.className = "resultBox status warn";
         return;
       }
@@ -744,12 +752,32 @@ ADMIN_HTML = """
         return;
       }
       if (data && (data.imported || data.catalog_count)) {
-        resultSummary.innerHTML = `<div class="resultTitle">Official Catalog updated</div><div class="meta">Catalog records were learned or imported. Paused matching jobs can resume.</div>`;
+        resultSummary.innerHTML = `<div class="resultTitle">Official Catalog updated</div><div class="meta">Catalog records were learned or imported. Paused matching jobs can resume.</div>${learningMetricsHtml(data)}`;
         resultSummary.className = "resultBox status ok";
         return;
       }
       resultSummary.innerHTML = `<div class="resultTitle">Result</div><div class="meta">See details below.</div>`;
       resultSummary.className = "resultBox";
+    }
+    function learningMetricsHtml(data) {
+      if (!data || data.flow !== "official_catalog_bootstrap") return "";
+      const rows = [
+        ["robots_txt_fetched", data.robots_txt_fetched],
+        ["robots_allowed", data.robots_allowed],
+        ["sitemap_found", data.sitemap_found],
+        ["sitemap_urls_found", data.sitemap_urls_found],
+        ["category_candidates_found", data.category_candidates_found],
+        ["product_candidates_found", data.product_candidates_found],
+        ["fetched_urls_count", data.fetched_urls_count],
+        ["parsed_product_pages_count", data.parsed_product_pages_count],
+        ["official_products_created", data.official_products_created],
+        ["official_product_assets_created", data.official_product_assets_created],
+        ["official_visual_references_created", data.official_visual_references_created],
+        ["official_catalog_status", data.official_catalog_status],
+        ["product_matching_status", data.product_matching_status],
+        ["next_best_action", data.next_best_action]
+      ];
+      return `<div class="meta" style="margin-top:10px">${rows.map(([k, v]) => `${esc(k)}: <strong>${esc(v)}</strong>`).join("<br>")}</div>`;
     }
     function setStatus(selector, text, kind = "") {
       const node = document.querySelector(selector);
@@ -760,7 +788,10 @@ ADMIN_HTML = """
     const esc = value => String(value ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
     async function postForm(url, form, statusSelector = null) {
       const button = form.querySelector("button[type='submit'], button");
-      if (statusSelector) setStatus(statusSelector, "Uploading... please wait.");
+      if (statusSelector) {
+        const learning = url.includes("/api/catalog/learn-site");
+        setStatus(statusSelector, learning ? "正在读取官网首页、检查 robots.txt、发现 sitemap、解析候选 URL..." : "Uploading... please wait.");
+      }
       if (button) button.disabled = true;
       try {
         const res = await fetch(url, { method: "POST", body: new FormData(form) });
@@ -773,7 +804,7 @@ ADMIN_HTML = """
         }
         if (statusSelector) {
           const isIncomplete = data && (data.result === "official_site_learning_partial" || data.result === "needs_manual_review" || data.official_catalog_status === "partial" || data.official_catalog_status === "missing" || data.result === "Needs Manual Import");
-          setStatus(statusSelector, isIncomplete ? "素材可以继续导入。官方目录学习未完成，商品身份确认暂停；请提供分类页、商品页或官方图片候选参考。Manual CSV 仅作为 fallback。" : `Done: ${JSON.stringify(data)}`, isIncomplete ? "warn" : "ok");
+          setStatus(statusSelector, isIncomplete ? "官网学习未完成，但素材可以继续导入。商品身份确认会暂停。请提供分类页 URL、商品页 URL，或官方图片候选用于继续 bootstrap。CSV / JSON 仅作为最终 fallback。" : `Done: ${JSON.stringify(data)}`, isIncomplete ? "warn" : "ok");
         }
         await refreshAll();
       } catch (error) {

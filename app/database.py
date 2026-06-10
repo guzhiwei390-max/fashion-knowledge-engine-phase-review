@@ -210,6 +210,62 @@ def init_db() -> None:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS official_catalog_import_jobs (
+                id TEXT PRIMARY KEY,
+                brand TEXT NOT NULL,
+                input_url TEXT NOT NULL,
+                optional_category_url TEXT,
+                optional_product_url TEXT,
+                status TEXT NOT NULL DEFAULT 'learning',
+                raw_asset_ingestion_status TEXT NOT NULL DEFAULT 'allowed',
+                official_catalog_status TEXT NOT NULL DEFAULT 'missing',
+                product_matching_status TEXT NOT NULL DEFAULT 'blocked_missing_official_catalog',
+                robots_txt_fetched INTEGER NOT NULL DEFAULT 0,
+                robots_allowed INTEGER NOT NULL DEFAULT 0,
+                sitemap_found INTEGER NOT NULL DEFAULT 0,
+                sitemap_urls_found INTEGER NOT NULL DEFAULT 0,
+                category_candidates_found INTEGER NOT NULL DEFAULT 0,
+                product_candidates_found INTEGER NOT NULL DEFAULT 0,
+                fetched_urls_count INTEGER NOT NULL DEFAULT 0,
+                parsed_product_pages_count INTEGER NOT NULL DEFAULT 0,
+                official_products_created INTEGER NOT NULL DEFAULT 0,
+                official_product_assets_created INTEGER NOT NULL DEFAULT 0,
+                official_visual_references_created INTEGER NOT NULL DEFAULT 0,
+                partial_reason TEXT NOT NULL DEFAULT '',
+                blocked_reason TEXT NOT NULL DEFAULT '',
+                next_best_action TEXT NOT NULL DEFAULT 'provide_category_url',
+                result_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS official_url_candidates (
+                id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES official_catalog_import_jobs(id) ON DELETE CASCADE,
+                brand TEXT NOT NULL,
+                candidate_url TEXT NOT NULL,
+                candidate_type TEXT NOT NULL,
+                source TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'candidate',
+                reason TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(job_id, candidate_url)
+            );
+
+            CREATE TABLE IF NOT EXISTS official_parse_events (
+                id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES official_catalog_import_jobs(id) ON DELETE CASCADE,
+                stage TEXT NOT NULL,
+                url TEXT NOT NULL,
+                status TEXT NOT NULL,
+                http_status INTEGER,
+                reason TEXT NOT NULL DEFAULT '',
+                parsed_records INTEGER NOT NULL DEFAULT 0,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS product_aliases (
                 id TEXT PRIMARY KEY,
                 product_id TEXT NOT NULL REFERENCES official_products(id) ON DELETE CASCADE,

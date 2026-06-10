@@ -78,6 +78,9 @@ def test_pipeline_schema_is_reserved_without_enabling_external_ingestion(isolate
         "review_queue",
         "product_aliases",
         "knowledge_source_index",
+        "official_catalog_import_jobs",
+        "official_url_candidates",
+        "official_parse_events",
     }.issubset(tables)
     assert {"pipeline_type", "truth_layer", "source_id", "external_ref_uri", "ingestion_metadata"}.issubset(asset_columns)
     assert {"product_family", "variant", "truth_layer", "truth_locked", "official_fields_json", "supplemental_fields_json"}.issubset(product_columns)
@@ -562,8 +565,20 @@ def test_official_catalog_bootstrap_can_use_sitemap_candidate(isolated_db, monke
             """,
         }
 
+    async def fake_robots(url):
+        return {
+            "url": "https://shop.example.com/robots.txt",
+            "fetched": True,
+            "allowed": True,
+            "status": "read",
+            "http_status": 200,
+            "reason": "",
+            "sitemap_urls": ["https://shop.example.com/sitemap.xml"],
+        }
+
     monkeypatch.setattr(catalog, "import_catalog_tree_url", fake_tree)
     monkeypatch.setattr(catalog, "fetch_public_text", fake_fetch)
+    monkeypatch.setattr(catalog, "fetch_robots_txt", fake_robots)
 
     result = asyncio.run(bootstrap_official_catalog("https://shop.example.com/", "Lululemon", max_pages=4))
 
@@ -571,7 +586,18 @@ def test_official_catalog_bootstrap_can_use_sitemap_candidate(isolated_db, monke
     assert result["official_catalog_status"] == "partial"
     assert result["product_matching_status"] == "blocked_missing_official_catalog"
     assert result["candidate_urls"] == ["https://shop.example.com/collections/women-jackets"]
+    assert result["robots_txt_fetched"] is True
+    assert result["sitemap_found"] is True
+    assert result["category_candidates_found"] == 1
+    assert result["official_products_created"] == 1
     assert catalog_count() == 1
+    with database.connect() as conn:
+        job_count = conn.execute("SELECT COUNT(*) AS count FROM official_catalog_import_jobs").fetchone()["count"]
+        event_count = conn.execute("SELECT COUNT(*) AS count FROM official_parse_events").fetchone()["count"]
+        candidate_count = conn.execute("SELECT COUNT(*) AS count FROM official_url_candidates").fetchone()["count"]
+    assert job_count == 1
+    assert event_count >= 2
+    assert candidate_count == 1
 
 
 def test_img_named_upload_matches_official_visual_reference(isolated_db, tmp_path):

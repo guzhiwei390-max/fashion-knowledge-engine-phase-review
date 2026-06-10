@@ -202,6 +202,14 @@ Official Site Learning is a multi-stage bootstrap flow:
 
 Manual import must not be the first response to incomplete homepage learning.
 
+Official Site Learning must be auditable. Each run records:
+
+- `official_catalog_import_jobs`
+- `official_url_candidates`
+- `official_parse_events`
+
+If no official products or assets are created, the run must remain `missing`, `blocked`, `partial`, or `needs_manual_review`; it must not be described as complete.
+
 CSV/JSON Manual Import is fallback only. It should be used when official site learning cannot proceed because public access is not available, robots.txt disallows access, the page requires login, the site is region blocked, or anti-bot protections prevent compliant access.
 
 Ordinary user uploads default to Reality Truth. A filename containing words such as "official" must not create Official Truth. Official Truth may only enter through Official Catalog or explicit official visual reference import paths.
