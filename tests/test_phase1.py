@@ -193,6 +193,9 @@ def test_zip_ingestion_is_allowed_without_official_catalog(isolated_db):
     assert response.status_code == 200
     payload = response.json()
     assert payload["total_received"] == 1
+    assert payload["raw_asset_ingestion_status"] == "allowed"
+    assert payload["official_catalog_status"] == "missing"
+    assert payload["product_matching_status"] == "blocked_missing_official_catalog"
     assert "官方商品目录" in payload["message"] or "Official Catalog" in payload["message"]
     with database.connect() as conn:
         asset = conn.execute("SELECT * FROM assets WHERE upload_batch_id = ?", (payload["batch_id"],)).fetchone()
@@ -200,6 +203,28 @@ def test_zip_ingestion_is_allowed_without_official_catalog(isolated_db):
     assert asset["truth_layer"] == TRUTH_REALITY
     assert asset["product_matching_status"] == "blocked_missing_official_catalog"
     assert job["status"] == "blocked_missing_official_catalog"
+
+
+def test_assets_import_zip_alias_returns_ingestion_statuses(isolated_db):
+    archive_bytes = io.BytesIO()
+    with zipfile.ZipFile(archive_bytes, "w") as archive:
+        image_buffer = io.BytesIO()
+        Image.new("RGB", (512, 512), (230, 230, 230)).save(image_buffer, "PNG")
+        archive.writestr("IMG_0002.png", image_buffer.getvalue())
+    archive_bytes.seek(0)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/assets/import-zip",
+        files={"file": ("raw-assets.zip", archive_bytes.getvalue(), "application/zip")},
+    )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["batch_id"]
+    assert payload["raw_asset_ingestion_status"] == "allowed"
+    assert payload["official_catalog_status"] == "missing"
+    assert payload["product_matching_status"] == "blocked_missing_official_catalog"
 
 
 def test_process_jobs_marks_identity_blocked_without_catalog(isolated_db, tmp_path):

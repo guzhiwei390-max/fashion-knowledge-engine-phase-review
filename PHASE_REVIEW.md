@@ -18,6 +18,9 @@ This iteration added:
 - Separate bootstrap statuses for raw ingestion, catalog readiness, and product matching
 - User-facing partial-learning message that keeps Zip upload available
 - Tests for sitemap candidate selection and bootstrap partial state
+- Explicit acceptance counters on Official Catalog Bootstrap responses
+- POST /api/assets/import-zip alias for Zip ingestion review
+- Raw ingestion status fields on Zip and loose image upload responses
 
 ---
 
@@ -44,6 +47,8 @@ Added interfaces:
 Modified interfaces:
 - POST /api/catalog/learn-site now uses Official Catalog Bootstrap instead of directly treating a failed page read as Manual Import.
 - POST /api/catalog/learn-site now returns raw_asset_ingestion_status, official_catalog_status, product_matching_status, candidate_urls, and stages.
+- POST /api/catalog/learn-site now also returns robots_txt_read, sitemap_discovered, sitemap_urls_attempted, sitemap_urls_found, category_candidates_found, product_candidates_found, fetched_urls_count, parsed_product_pages_count, official_products_created, and official_product_assets_created.
+- POST /api/import/zip and POST /api/assets/import-zip return raw_asset_ingestion_status, official_catalog_status, and product_matching_status.
 
 ---
 
@@ -74,7 +79,9 @@ Currently working:
 - Product/category/collection URLs can be extracted from sitemap XML.
 - Partial learning returns a clear message asking for category URL, product URL, or official candidate references.
 - Manual CSV/JSON is presented as final fallback only.
-- Automated tests pass: 47 passed
+- Actual lululemon homepage acceptance run returned needs_manual_review because robots.txt access could not be verified.
+- Zip upload acceptance run returned batch_id with raw_asset_ingestion_status = allowed and product_matching_status = blocked_missing_official_catalog.
+- Automated tests pass: 48 passed
 
 ---
 

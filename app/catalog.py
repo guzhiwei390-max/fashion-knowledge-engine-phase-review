@@ -314,6 +314,7 @@ def bootstrap_success_result(
         "raw_asset_ingestion_status": "allowed",
         "official_catalog_status": status,
         "product_matching_status": product_matching_status,
+        **bootstrap_metrics(stages, candidate_urls or []),
         "stages": stages,
         "candidate_urls": (candidate_urls or [])[:MAX_CATEGORY_TREE_PAGES],
         "message": message,
@@ -335,10 +336,33 @@ def bootstrap_partial_result(
         "raw_asset_ingestion_status": "allowed",
         "official_catalog_status": official_catalog_status,
         "product_matching_status": "blocked_missing_official_catalog",
+        **bootstrap_metrics(stages, candidate_urls),
         "candidate_urls": candidate_urls[:MAX_CATEGORY_TREE_PAGES],
         "stages": stages,
         "message": BOOTSTRAP_USER_MESSAGE,
         "fallback": "Manual CSV/JSON is final fallback only after public official URLs and candidate references cannot be used.",
+    }
+
+
+def bootstrap_metrics(stages: list[dict[str, Any]], candidate_urls: list[str]) -> dict[str, int | bool]:
+    sitemap_stages = [stage for stage in stages if stage.get("stage") == "sitemap"]
+    fetched_stages = [stage for stage in stages if stage.get("status") == "read"]
+    parsed_product_pages = [
+        stage
+        for stage in stages
+        if int(stage.get("imported", 0) or 0) > 0
+    ]
+    return {
+        "robots_txt_read": not any(stage.get("status") == "robots_blocked" for stage in stages),
+        "sitemap_discovered": any(stage.get("status") == "read" for stage in sitemap_stages),
+        "sitemap_urls_attempted": len(sitemap_stages),
+        "sitemap_urls_found": sum(1 for stage in sitemap_stages if stage.get("status") == "read"),
+        "category_candidates_found": sum(1 for url in candidate_urls if looks_like_category_url(url) or looks_like_collection_or_catalog_url(url)),
+        "product_candidates_found": sum(1 for url in candidate_urls if looks_like_product_url(url)),
+        "fetched_urls_count": len(fetched_stages),
+        "parsed_product_pages_count": len(parsed_product_pages),
+        "official_products_created": sum(int(stage.get("imported", 0) or 0) for stage in stages),
+        "official_product_assets_created": sum(int(stage.get("visual_references_created", 0) or 0) for stage in stages),
     }
 
 

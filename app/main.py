@@ -91,10 +91,12 @@ async def upload_images(files: Annotated[list[UploadFile], File(...)]) -> dict:
         "batch_id": batch_id,
         "total_received": len(imported),
         "status": "ingested",
+        **raw_ingestion_status_fields(),
         "message": raw_ingestion_message(),
     }
 
 
+@app.post("/api/assets/import-zip")
 @app.post("/api/import/zip")
 async def import_zip(file: Annotated[UploadFile, File(...)]) -> dict:
     if not file.filename or Path(file.filename).suffix.lower() != ".zip":
@@ -117,7 +119,17 @@ async def import_zip(file: Annotated[UploadFile, File(...)]) -> dict:
         "total_received": summary["total_received"],
         "unsupported_count": summary["unsupported_count"],
         "status": summary["status"],
+        **raw_ingestion_status_fields(),
         "message": raw_ingestion_message(),
+    }
+
+
+def raw_ingestion_status_fields() -> dict[str, str]:
+    catalog_ready = catalog_count() > 0
+    return {
+        "raw_asset_ingestion_status": "allowed",
+        "official_catalog_status": "ready" if catalog_ready else "missing",
+        "product_matching_status": "ready" if catalog_ready else "blocked_missing_official_catalog",
     }
 
 
