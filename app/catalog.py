@@ -8,6 +8,7 @@ import tempfile
 import asyncio
 import urllib.parse
 import urllib.robotparser
+import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,12 @@ MAX_CATEGORY_PRODUCTS = 80
 MAX_OFFICIAL_IMAGES_PER_PRODUCT = 6
 MAX_CATEGORY_TREE_PAGES = 12
 CATEGORY_TREE_DELAY_SECONDS = 0.75
+BOOTSTRAP_USER_MESSAGE = (
+    "Assets can continue to be ingested. Official catalog learning is incomplete, "
+    "so product identity confirmation is paused. Provide a brand category URL, "
+    "product URL, or official screenshots/product images as candidate references. "
+    "Manual CSV/JSON is fallback only."
+)
 
 
 def normalize(value: str) -> str:
@@ -47,6 +54,12 @@ def canonical_brand(value: str) -> str:
 def catalog_count() -> int:
     with connect() as conn:
         row = conn.execute("SELECT COUNT(*) AS count FROM official_products").fetchone()
+        return int(row["count"])
+
+
+def visual_reference_count() -> int:
+    with connect() as conn:
+        row = conn.execute("SELECT COUNT(*) AS count FROM official_product_visual_references").fetchone()
         return int(row["count"])
 
 
@@ -194,6 +207,237 @@ async def import_catalog_tree_url(url: str, brand: str, max_pages: int = MAX_CAT
         imported["result"] = "Needs Manual Import"
         imported["reason"] = "catalog tree imported but no official visual reference could be created"
     return imported
+
+
+async def bootstrap_official_catalog(url: str, brand: str, max_pages: int = MAX_CATEGORY_TREE_PAGES) -> dict[str, Any]:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"https", "http"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="A public official website URL is required")
+    if max_pages < 1 or max_pages > MAX_CATEGORY_TREE_PAGES:
+        raise HTTPException(status_code=400, detail=f"max_pages must be between 1 and {MAX_CATEGORY_TREE_PAGES}")
+
+    canonical = canonical_brand(brand)
+    stages: list[dict[str, Any]] = []
+    before_products = catalog_count()
+    before_references = visual_reference_count()
+
+    homepage_result = await import_catalog_tree_url(url, canonical, max_pages=max_pages)
+    stages.append(stage_from_import_result("homepage_or_provided_url", url, homepage_result))
+    ready = bootstrap_ready_status(before_products, before_references)
+    if ready == "ready":
+        return bootstrap_success_result(homepage_result, stages, ready)
+
+    sitemap_urls = sitemap_entry_urls(url)
+    candidate_urls: list[str] = []
+    for sitemap_url in sitemap_urls:
+        sitemap = await fetch_public_text(sitemap_url, accept="application/xml,text/xml,text/plain,*/*")
+        stages.append(
+            {
+                "stage": "sitemap",
+                "url": sitemap_url,
+                "status": sitemap["status"],
+                "reason": sitemap.get("reason", ""),
+            }
+        )
+        if sitemap["status"] != "read":
+            continue
+        for candidate in candidate_urls_from_sitemap_xml(str(sitemap["text"]), url):
+            if candidate not in candidate_urls:
+                candidate_urls.append(candidate)
+        if len(candidate_urls) >= max_pages * 2:
+            break
+
+    for candidate_url in candidate_urls[:max_pages]:
+        candidate_result = await import_catalog_tree_url(candidate_url, canonical, max_pages=min(4, max_pages))
+        stages.append(stage_from_import_result("sitemap_candidate", candidate_url, candidate_result))
+        ready = bootstrap_ready_status(before_products, before_references)
+        if ready == "ready":
+            return bootstrap_success_result(candidate_result, stages, ready, candidate_urls=candidate_urls)
+
+    if catalog_count() > before_products:
+        return bootstrap_partial_result(
+            "official products were learned, but official visual references are incomplete",
+            stages=stages,
+            candidate_urls=candidate_urls,
+            official_catalog_status="partial",
+        )
+
+    if candidate_urls:
+        return bootstrap_partial_result(
+            "sitemap candidates were found but no extractable public product data was confirmed",
+            stages=stages,
+            candidate_urls=candidate_urls,
+            official_catalog_status="missing",
+        )
+
+    blocked_reasons = [
+        str(stage.get("reason", ""))
+        for stage in stages
+        if stage.get("status") in {"robots_blocked", "access_blocked", "unreadable"}
+    ]
+    result = "needs_manual_review" if blocked_reasons else "official_site_learning_partial"
+    return bootstrap_partial_result(
+        blocked_reasons[0] if blocked_reasons else "homepage and sitemap did not expose an extractable public catalog",
+        stages=stages,
+        candidate_urls=candidate_urls,
+        official_catalog_status="missing",
+        result=result,
+    )
+
+
+def bootstrap_ready_status(before_products: int, before_references: int) -> str | None:
+    products_added = catalog_count() > before_products
+    references_added = visual_reference_count() > before_references
+    if products_added and references_added:
+        return "ready"
+    if products_added:
+        return "partial"
+    return None
+
+
+def bootstrap_success_result(
+    imported: dict[str, Any],
+    stages: list[dict[str, Any]],
+    status: str,
+    candidate_urls: list[str] | None = None,
+) -> dict[str, Any]:
+    product_matching_status = "ready" if status == "ready" else "blocked_missing_official_catalog"
+    message = (
+        "Official Catalog and official visual references were learned. Product matching can resume."
+        if status == "ready"
+        else BOOTSTRAP_USER_MESSAGE
+    )
+    return {
+        **imported,
+        "result": "Known" if status == "ready" else "official_site_learning_partial",
+        "flow": "official_catalog_bootstrap",
+        "raw_asset_ingestion_status": "allowed",
+        "official_catalog_status": status,
+        "product_matching_status": product_matching_status,
+        "stages": stages,
+        "candidate_urls": (candidate_urls or [])[:MAX_CATEGORY_TREE_PAGES],
+        "message": message,
+    }
+
+
+def bootstrap_partial_result(
+    reason: str,
+    *,
+    stages: list[dict[str, Any]],
+    candidate_urls: list[str],
+    official_catalog_status: str,
+    result: str = "official_site_learning_partial",
+) -> dict[str, Any]:
+    return {
+        "result": result,
+        "flow": "official_catalog_bootstrap",
+        "reason": reason,
+        "raw_asset_ingestion_status": "allowed",
+        "official_catalog_status": official_catalog_status,
+        "product_matching_status": "blocked_missing_official_catalog",
+        "candidate_urls": candidate_urls[:MAX_CATEGORY_TREE_PAGES],
+        "stages": stages,
+        "message": BOOTSTRAP_USER_MESSAGE,
+        "fallback": "Manual CSV/JSON is final fallback only after public official URLs and candidate references cannot be used.",
+    }
+
+
+def stage_from_import_result(stage: str, url: str, result: dict[str, Any]) -> dict[str, Any]:
+    status = "read"
+    if result.get("result") == "Needs Manual Import":
+        status = "partial"
+    if "robots" in str(result.get("reason", "")).lower():
+        status = "robots_blocked"
+    if any(marker in str(result.get("reason", "")).lower() for marker in ("login", "rate limited", "access denied")):
+        status = "access_blocked"
+    return {
+        "stage": stage,
+        "url": url,
+        "status": status,
+        "result": result.get("result", result.get("status", "")),
+        "reason": result.get("reason", ""),
+        "imported": result.get("imported", 0),
+        "visual_references_created": result.get("visual_references_created", 0),
+    }
+
+
+def sitemap_entry_urls(url: str) -> list[str]:
+    parsed = urllib.parse.urlparse(url)
+    base = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, "", "", "", ""))
+    candidates = [
+        "/sitemap.xml",
+        "/sitemap_index.xml",
+        "/sitemap-products.xml",
+        "/sitemap_products_1.xml",
+        "/sitemap-collections.xml",
+        "/sitemap_collections_1.xml",
+    ]
+    return [urllib.parse.urljoin(base, path) for path in candidates]
+
+
+async def fetch_public_text(url: str, accept: str = "text/html,application/xhtml+xml") -> dict[str, Any]:
+    robot_status = await robots_allowed(url)
+    if robot_status is not True:
+        return {"status": "robots_blocked", "reason": "robots.txt disallows access or could not be verified", "text": ""}
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=15,
+            headers={"User-Agent": USER_AGENT, "Accept": accept},
+        ) as client:
+            response = await client.get(url)
+    except httpx.HTTPError:
+        return {"status": "unreadable", "reason": "page could not be accessed", "text": ""}
+    if response.status_code in {401, 403, 429}:
+        return {"status": "access_blocked", "reason": "access denied, login required, or rate limited", "text": ""}
+    if response.status_code >= 400:
+        return {"status": "unreadable", "reason": f"page returned HTTP {response.status_code}", "text": ""}
+    return {"status": "read", "reason": "", "text": response.text, "url": str(response.url)}
+
+
+def candidate_urls_from_sitemap_xml(xml_text: str, root_url: str, limit: int = MAX_CATEGORY_TREE_PAGES * 3) -> list[str]:
+    urls = sitemap_locs_from_xml(xml_text)
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        if not same_site(root_url, url):
+            continue
+        if not (looks_like_product_url(url) or looks_like_category_url(url) or looks_like_collection_or_catalog_url(url)):
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        candidates.append(url)
+        if len(candidates) >= limit:
+            break
+    candidates.sort(key=sitemap_candidate_rank)
+    return candidates[:limit]
+
+
+def sitemap_locs_from_xml(xml_text: str) -> list[str]:
+    locs: list[str] = []
+    try:
+        root = ET.fromstring(xml_text)
+        for element in root.iter():
+            if element.tag.lower().endswith("loc") and element.text:
+                locs.append(element.text.strip())
+    except ET.ParseError:
+        locs.extend(re.findall(r"<loc>\s*([^<]+?)\s*</loc>", xml_text, flags=re.IGNORECASE))
+    return [loc for loc in locs if loc.startswith(("http://", "https://"))]
+
+
+def sitemap_candidate_rank(url: str) -> tuple[int, str]:
+    lowered = url.lower()
+    if looks_like_category_url(url) or looks_like_collection_or_catalog_url(url):
+        return (0, lowered)
+    if looks_like_product_url(url):
+        return (1, lowered)
+    return (2, lowered)
+
+
+def looks_like_collection_or_catalog_url(href: str) -> bool:
+    lowered = href.lower()
+    return any(marker in lowered for marker in ("/collection/", "/collections/", "/catalog/", "/shop/"))
 
 
 def import_catalog_tree_from_html_pages(

@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from .assets import batch_progress, import_zip_file, save_upload_file
 from .catalog import (
     add_official_visual_reference,
+    bootstrap_official_catalog,
     catalog_count,
     import_catalog_file,
     import_catalog_tree_url,
@@ -161,19 +162,13 @@ async def learn_official_site(
     brand: Annotated[str, Form()],
     max_pages: Annotated[int, Form()] = 8,
 ) -> dict:
-    result = await import_catalog_tree_url(url, brand, max_pages=max_pages)
-    if result.get("status") == "Needs Manual Import" or catalog_count() == 0:
-        return {
-            **result,
-            "flow": "official_site_learning",
-            "fallback": "Needs Manual Import",
-            "message": "Official site learning could not build a catalog. Provide a public brand category page or use CSV/JSON fallback.",
-        }
+    result = await bootstrap_official_catalog(url, brand, max_pages=max_pages)
+    if result.get("official_catalog_status") != "ready" or result.get("product_matching_status") != "ready":
+        return result
     return {
         **result,
-        "flow": "official_site_learning",
         "unblocked_jobs": unblock_missing_catalog_jobs(),
-        "message": "Official Catalog was built automatically. Previously paused product matching jobs are queued again.",
+        "message": "Official Catalog and official visual references were learned. Previously paused product matching jobs are queued again.",
     }
 
 
@@ -647,11 +642,11 @@ ADMIN_HTML = """
               <button type="submit">Learn Official Catalog</button>
             </form>
             <div id="learnStatus" class="status">Paste a public official site, category page, or product page URL.</div>
-            <div class="meta" style="margin-top:10px">The system reads public allowed official pages, builds Official Catalog, then resumes product matching for uploaded batches.</div>
+            <div class="meta" style="margin-top:10px">The system first tries the homepage, then sitemap, then public category/product candidates. If learning is incomplete, raw zip upload still works and product identity waits.</div>
           </div>
           <details class="step">
             <summary class="stepTitle"><span class="badge">!</span><span>Manual fallback only</span></summary>
-            <div class="meta" style="margin:8px 0 12px">Use this only when official site learning returns Needs Manual Import.</div>
+            <div class="meta" style="margin:8px 0 12px">Use this only after public URLs and candidate official references cannot complete catalog learning.</div>
             <form id="catalogForm">
               <input type="file" name="file" accept=".csv,.json" />
               <button type="submit">Import CSV/JSON Fallback</button>
@@ -721,8 +716,13 @@ ADMIN_HTML = """
     }
     function renderResultSummary(data) {
       const marker = data && (data.result || data.status || data.fallback || "");
+      if (marker === "official_site_learning_partial" || marker === "needs_manual_review" || data.official_catalog_status === "partial" || data.official_catalog_status === "missing") {
+        resultSummary.innerHTML = `<div class="resultTitle">Official learning is incomplete</div><div class="meta">素材可以继续导入。当前官方目录学习未完成，商品身份确认会暂停。请提供品牌分类页 URL、商品页 URL，或上传官方页面截图 / 官方产品图片作为候选参考。Manual CSV 仅作为 fallback。</div>`;
+        resultSummary.className = "resultBox status warn";
+        return;
+      }
       if (marker === "Needs Manual Import" || data.fallback === "Needs Manual Import") {
-        resultSummary.innerHTML = `<div class="resultTitle">Official site access needs fallback</div><div class="meta">The site could not be read through public compliant access. This is not a raw asset upload failure. You can still upload zip files; product identity matching stays paused until an Official Catalog is available.</div>`;
+        resultSummary.innerHTML = `<div class="resultTitle">Manual fallback may be needed later</div><div class="meta">Raw asset upload is still allowed. Product identity matching remains paused until Official Catalog is ready.</div>`;
         resultSummary.className = "resultBox status warn";
         return;
       }
@@ -760,8 +760,8 @@ ADMIN_HTML = """
           return;
         }
         if (statusSelector) {
-          const isFallback = data && (data.result === "Needs Manual Import" || data.fallback === "Needs Manual Import");
-          setStatus(statusSelector, isFallback ? "Official site could not be read compliantly. Use Manual fallback only for this brand/source, or try a different public category/product URL." : `Done: ${JSON.stringify(data)}`, isFallback ? "warn" : "ok");
+          const isIncomplete = data && (data.result === "official_site_learning_partial" || data.result === "needs_manual_review" || data.official_catalog_status === "partial" || data.official_catalog_status === "missing" || data.result === "Needs Manual Import");
+          setStatus(statusSelector, isIncomplete ? "素材可以继续导入。官方目录学习未完成，商品身份确认暂停；请提供分类页、商品页或官方图片候选参考。Manual CSV 仅作为 fallback。" : `Done: ${JSON.stringify(data)}`, isIncomplete ? "warn" : "ok");
         }
         await refreshAll();
       } catch (error) {

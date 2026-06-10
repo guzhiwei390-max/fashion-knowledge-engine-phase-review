@@ -1,4 +1,5 @@
 from pathlib import Path
+import asyncio
 import io
 import zipfile
 
@@ -9,7 +10,9 @@ from fastapi.testclient import TestClient
 from app import assets, catalog, database
 from app.catalog import (
     add_official_visual_reference,
+    bootstrap_official_catalog,
     catalog_count,
+    candidate_urls_from_sitemap_xml,
     determine_import_type,
     extract_category_links_from_html,
     extract_catalog_records_from_html,
@@ -485,6 +488,65 @@ def test_category_tree_import_collects_same_site_category_pages(isolated_db):
     assert result["pages_read"] == 2
     assert result["imported"] == 3
     assert catalog_count() == 3
+
+
+def test_sitemap_candidates_prioritize_public_catalog_urls():
+    sitemap = """
+    <urlset>
+      <url><loc>https://shop.example.com/pages/about</loc></url>
+      <url><loc>https://shop.example.com/products/define-jacket</loc></url>
+      <url><loc>https://shop.example.com/collections/women-jackets</loc></url>
+      <url><loc>https://other.example.com/collections/copy</loc></url>
+    </urlset>
+    """
+
+    candidates = candidate_urls_from_sitemap_xml(sitemap, "https://shop.example.com/")
+
+    assert candidates[0] == "https://shop.example.com/collections/women-jackets"
+    assert "https://shop.example.com/products/define-jacket" in candidates
+    assert all("other.example.com" not in url for url in candidates)
+
+
+def test_official_catalog_bootstrap_can_use_sitemap_candidate(isolated_db, monkeypatch):
+    async def fake_tree(url, brand, max_pages=8):
+        if "collections/women-jackets" not in url:
+            return needs_manual_import("could not extract public product data from category tree")
+        return import_catalog_records(
+            [
+                {
+                    "brand": brand,
+                    "product_name": "Define Jacket",
+                    "category": "Women Jackets",
+                    "description": "Official product description",
+                    "material": "Nulu",
+                    "official_url": url,
+                    "official_white_bg": "https://shop.example.com/define.jpg",
+                }
+            ],
+            import_type="catalog_tree_import",
+        )
+
+    async def fake_fetch(url, accept=""):
+        return {
+            "status": "read",
+            "reason": "",
+            "text": """
+            <urlset>
+              <url><loc>https://shop.example.com/collections/women-jackets</loc></url>
+            </urlset>
+            """,
+        }
+
+    monkeypatch.setattr(catalog, "import_catalog_tree_url", fake_tree)
+    monkeypatch.setattr(catalog, "fetch_public_text", fake_fetch)
+
+    result = asyncio.run(bootstrap_official_catalog("https://shop.example.com/", "Lululemon", max_pages=4))
+
+    assert result["raw_asset_ingestion_status"] == "allowed"
+    assert result["official_catalog_status"] == "partial"
+    assert result["product_matching_status"] == "blocked_missing_official_catalog"
+    assert result["candidate_urls"] == ["https://shop.example.com/collections/women-jackets"]
+    assert catalog_count() == 1
 
 
 def test_img_named_upload_matches_official_visual_reference(isolated_db, tmp_path):

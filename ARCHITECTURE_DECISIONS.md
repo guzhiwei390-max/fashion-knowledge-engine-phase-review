@@ -192,6 +192,16 @@ The system is responsible for learning public official product data when access 
 - Official Product Assets
 - Official Product DNA
 
+Official Site Learning is a multi-stage bootstrap flow:
+
+1. Try the provided official homepage, category URL, or product URL.
+2. If that is insufficient, try public sitemap URLs.
+3. If sitemap data is readable, extract product, category, collection, or catalog candidate URLs.
+4. Try the public candidate URLs before asking for manual review.
+5. If compliant access is blocked or data remains insufficient, return `official_site_learning_partial` or `needs_manual_review`.
+
+Manual import must not be the first response to incomplete homepage learning.
+
 CSV/JSON Manual Import is fallback only. It should be used when official site learning cannot proceed because public access is not available, robots.txt disallows access, the page requires login, the site is region blocked, or anti-bot protections prevent compliant access.
 
 Ordinary user uploads default to Reality Truth. A filename containing words such as "official" must not create Official Truth. Official Truth may only enter through Official Catalog or explicit official visual reference import paths.

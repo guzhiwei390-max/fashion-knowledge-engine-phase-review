@@ -1,6 +1,6 @@
 # Current Version
 
-Current version: Phase 1 User-Facing Workflow Cleanup v1.1
+Current version: Phase 1 Official Catalog Bootstrap v1.2
 
 Current Commit Hash: pending until commit; see final response for exact hash
 
@@ -11,12 +11,13 @@ Current Branch: master
 # Added
 
 This iteration added:
-- User-facing Start Here workflow
-- Primary Step 1: Upload Zip
-- Primary Step 2: Learn Official Catalog from brand website URL
-- CSV/JSON moved into Manual fallback only
-- Internal fields hidden from the main UI
-- Official Assets display changed to user-facing language
+- Multi-stage Official Catalog Bootstrap
+- Homepage-first official site learning
+- Sitemap discovery for product/category/collection URLs
+- Candidate URL extraction from sitemap XML
+- Separate bootstrap statuses for raw ingestion, catalog readiness, and product matching
+- User-facing partial-learning message that keeps Zip upload available
+- Tests for sitemap candidate selection and bootstrap partial state
 
 ---
 
@@ -26,82 +27,82 @@ Added tables:
 - None
 
 Modified tables:
-- None in this UI-only iteration
+- None
 
-State values:
-- pending
-- blocked_missing_official_catalog
+State values used:
+- raw_asset_ingestion_status = allowed
+- official_catalog_status = missing / partial / ready
+- product_matching_status = blocked_missing_official_catalog / ready
 
 ---
 
 # API Changes
 
 Added interfaces:
-- POST /api/catalog/learn-site
+- None
 
 Modified interfaces:
-- No API contract changes in this UI-only iteration
+- POST /api/catalog/learn-site now uses Official Catalog Bootstrap instead of directly treating a failed page read as Manual Import.
+- POST /api/catalog/learn-site now returns raw_asset_ingestion_status, official_catalog_status, product_matching_status, candidate_urls, and stages.
 
 ---
 
 # Architecture Changes
 
-This iteration corrected a major rule:
-- The page no longer asks users to fill internal catalog_page, product_id, asset_type, official_white_bg, category tree, or visual reference fields.
-- The user-facing flow is now Upload Zip first, then provide brand name and official site/category/product URL.
-- Manual CSV/JSON import is visually demoted to fallback only.
-- Internal API compatibility remains, but internal pipeline fields are not part of the main user workflow.
+This iteration corrected the Official Site Learning flow:
+- Official Catalog creation is no longer treated as a single page read.
+- The system first tries the provided homepage/category/product URL.
+- If that is insufficient, the system tries common public sitemap URLs.
+- If sitemap data is readable, the system extracts product/category/collection candidate URLs.
+- Candidate URLs are tried before any Manual CSV/JSON fallback is suggested.
+- Failed or partial official site learning does not block Raw Asset Ingestion.
 
-Correct flow:
-- User uploads zip or images
-- System saves originals, creates batch_id, extracts metadata, creates thumbnails, detects corruption, unsupported files, low quality, duplicates, and coarse asset type
-- If Official Catalog is missing, product identity matching is paused with product_matching_status = blocked_missing_official_catalog
-- User provides brand official website, category URL, or product URL
-- System performs Official Site Learning from public allowed pages
-- System builds Official Product Catalog and Official Product Assets
-- Previously paused matching jobs are requeued
-
-Manual CSV/JSON import is now documented as fallback only when Official Site Learning returns Needs Manual Import.
+Status separation is now explicit:
+- Raw Asset Ingestion remains allowed.
+- Official Catalog can be missing, partial, or ready.
+- Product Matching remains blocked when official catalog/visual reference evidence is incomplete.
 
 ---
 
 # What Works
 
 Currently working:
-- Page presents a simple two-step workflow: upload material package, then learn official catalog from brand website.
-- Zip upload remains available before Official Catalog exists.
-- Official Site Learning is the primary catalog creation action.
-- CSV/JSON import is available only inside Manual fallback.
-- Official product ids, visual reference types, expected_page_type, and category-tree internals are not exposed in the main UI.
-- Automated tests pass: 45 passed
+- Users can upload Zip files before Official Catalog exists.
+- Uploaded files are saved and tracked instead of rejected due to missing catalog.
+- Official Site Learning attempts homepage/category/product import first.
+- Official Site Learning attempts sitemap discovery after incomplete homepage learning.
+- Product/category/collection URLs can be extracted from sitemap XML.
+- Partial learning returns a clear message asking for category URL, product URL, or official candidate references.
+- Manual CSV/JSON is presented as final fallback only.
+- Automated tests pass: 47 passed
 
 ---
 
 # Known Limitations
 
 Known limitations:
-- Official Site Learning remains conservative and only reads public allowed pages.
-- JS-heavy, login-required, region-blocked, robots-disallowed, or anti-bot-protected pages still return Needs Manual Import.
-- Official Product DNA generation from official site data is still basic and depends on what the public page exposes.
-- Matching requeue happens after catalog creation, but there is not yet a long-running worker service.
-- Admin UI is functional but still minimal for high-volume operations.
+- Official site parsing remains conservative and only reads public pages allowed by robots.txt.
+- JS-heavy, login-required, region-blocked, rate-limited, or anti-bot-protected sites may still require manual review.
+- Official visual reference creation still depends on public image URLs being accessible.
+- Product DNA generated from official pages is still basic when public metadata is sparse.
+- There is not yet a browser-rendered official site parser for compliant JS pages.
 
 ---
 
 # Next Recommended Step
 
 Recommended next step:
-- Use the simplified page to upload the real mixed zip.
-- Provide one brand official category URL and verify Official Site Learning can build the catalog.
-- Improve Official Site Learning extraction for common product-list structured data patterns.
-- Add clearer batch progress counters for blocked_missing_official_catalog.
+- Test with one real brand homepage and one real category URL.
+- Add official screenshot / official product image candidate reference upload as a guided fallback before CSV.
+- Improve extraction for common ecommerce structured-data patterns.
+- Add a dedicated UI panel showing official_catalog_status and product_matching_status.
 
 ---
 
 # Review Focus
 
 Please review:
-- Whether the page is now user-facing rather than pipeline-facing.
-- Whether users can follow Upload Zip -> Learn Official Catalog without understanding database fields.
-- Whether CSV/JSON is clearly fallback only.
-- Whether internal catalog fields are no longer exposed as primary UI inputs.
+- Whether Raw Asset Ingestion is fully decoupled from Official Catalog readiness.
+- Whether Official Site Learning now behaves like a bootstrap flow rather than a one-page importer.
+- Whether partial/blocked states are clear enough for large batch workflows.
+- Whether Manual CSV/JSON is no longer treated as the primary user responsibility.
